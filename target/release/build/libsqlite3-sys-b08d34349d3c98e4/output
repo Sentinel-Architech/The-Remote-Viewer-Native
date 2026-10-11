@@ -1,0 +1,72 @@
+cargo:rerun-if-env-changed=LIBSQLITE3_SYS_USE_PKG_CONFIG
+cargo:include=/data/data/com.termux/files/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libsqlite3-sys-0.28.0/sqlite3
+cargo:rerun-if-changed=sqlite3/sqlite3.c
+cargo:rerun-if-changed=sqlite3/wasm32-wasi-vfs.c
+cargo:rerun-if-env-changed=SQLITE_MAX_VARIABLE_NUMBER
+cargo:rerun-if-env-changed=SQLITE_MAX_EXPR_DEPTH
+cargo:rerun-if-env-changed=SQLITE_MAX_COLUMN
+cargo:rerun-if-env-changed=LIBSQLITE3_FLAGS
+cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+CC_FORCE_DISABLE = None
+cargo:rerun-if-env-changed=CC_aarch64-linux-android
+CC_aarch64-linux-android = None
+cargo:rerun-if-env-changed=CC_aarch64_linux_android
+CC_aarch64_linux_android = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_linux_android
+CFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-linux-android
+CFLAGS_aarch64-linux-android = None
+cargo:rerun-if-env-changed=CC_FORCE_DISABLE
+CC_FORCE_DISABLE = None
+cargo:rerun-if-env-changed=AR_aarch64-linux-android
+AR_aarch64-linux-android = None
+cargo:rerun-if-env-changed=AR_aarch64_linux_android
+AR_aarch64_linux_android = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+LLVM (http://llvm.org/):
+  LLVM version 21.1.8
+  Optimized build.
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64_linux_android
+ARFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64-linux-android
+ARFLAGS_aarch64-linux-android = None
+cargo:rerun-if-env-changed=AR_aarch64-linux-android
+AR_aarch64-linux-android = None
+cargo:rerun-if-env-changed=AR_aarch64_linux_android
+AR_aarch64_linux_android = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+LLVM (http://llvm.org/):
+  LLVM version 21.1.8
+  Optimized build.
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64_linux_android
+ARFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64-linux-android
+ARFLAGS_aarch64-linux-android = None
+cargo:rustc-link-lib=static=sqlite3
+cargo:rustc-link-search=native=/data/data/com.termux/files/home/The-Remote-Viewer-Native/target/release/build/libsqlite3-sys-b08d34349d3c98e4/out
+cargo:lib_dir=/data/data/com.termux/files/home/The-Remote-Viewer-Native/target/release/build/libsqlite3-sys-b08d34349d3c98e4/out

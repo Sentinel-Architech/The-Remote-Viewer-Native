@@ -1496,6 +1496,7 @@ dependencies = [
  "hex",
  "qrcode",
  "rand_core",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
