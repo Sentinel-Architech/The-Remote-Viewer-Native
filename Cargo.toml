@@ -1,0 +1,3 @@
+[workspace]
+members = ["core", "backend"]
+resolver = "2"
