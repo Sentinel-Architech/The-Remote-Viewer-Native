@@ -1,1 +1,1 @@
-/data/data/com.termux/files/home/The-Remote-Viewer-Native/target/release/libtrv_core.a: /data/data/com.termux/files/home/The-Remote-Viewer-Native/core/src/lib.rs
+/data/data/com.termux/files/home/The-Remote-Viewer-Native/target/release/libtrv_core.rlib: /data/data/com.termux/files/home/The-Remote-Viewer-Native/core/shaders/trv_eye_vortex.frag /data/data/com.termux/files/home/The-Remote-Viewer-Native/core/src/gfx_vortex.rs /data/data/com.termux/files/home/The-Remote-Viewer-Native/core/src/lib.rs

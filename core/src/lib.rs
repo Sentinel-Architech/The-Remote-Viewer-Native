@@ -63,3 +63,6 @@ pub extern "C" fn trv_free_string(s: *mut c_char) {
         }
     }
 }
+
+pub mod gfx_vortex;
+pub use gfx_vortex::*;
