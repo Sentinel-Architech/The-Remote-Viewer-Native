@@ -52,6 +52,7 @@
 //! | `ArRewards` | *none yet* — no executable code path | n/a |
 //! | `NewsFull` | *none yet* — no executable code path | n/a |
 //! | `VpnBasic` / `VpnPlus` | *none yet* — VPN is parked | n/a |
+//! | `IdentityVerification` | `ui::verify_ui::VerifyScreen::begin_flow` | **yes** — denies without a live paid entitlement |
 //!
 //! When a new entry point is added for any feature, it MUST consult
 //! [`can_access`] first. An entry point that runs a gated feature
@@ -79,6 +80,9 @@ pub enum Feature {
     VpnBasic,
     /// VPN with more locations and options (paid tiers).
     VpnPlus,
+    /// On-device ID verification (document check + liveness). Paid
+    /// tiers only — ghost tier must verify+pay before verifying.
+    IdentityVerification,
 }
 
 impl Feature {
@@ -93,6 +97,7 @@ impl Feature {
             Feature::NewsFull => "news-full",
             Feature::VpnBasic => "vpn-basic",
             Feature::VpnPlus => "vpn-plus",
+            Feature::IdentityVerification => "identity-verification",
         }
     }
 
@@ -108,12 +113,13 @@ impl Feature {
             "news-full" => Feature::NewsFull,
             "vpn-basic" => Feature::VpnBasic,
             "vpn-plus" => Feature::VpnPlus,
+            "identity-verification" => Feature::IdentityVerification,
             _ => return None,
         })
     }
 
     /// Every feature, for exhaustive testing.
-    pub fn all() -> [Feature; 8] {
+    pub fn all() -> [Feature; 9] {
         [
             Feature::ResearchFull,
             Feature::UnlimitedEi,
@@ -123,6 +129,7 @@ impl Feature {
             Feature::NewsFull,
             Feature::VpnBasic,
             Feature::VpnPlus,
+            Feature::IdentityVerification,
         ]
     }
 }
@@ -140,7 +147,8 @@ fn min_tier(feature: Feature) -> Tier {
         | Feature::Messaging
         | Feature::ArRewards
         | Feature::NewsFull
-        | Feature::VpnPlus => Tier::Monthly,
+        | Feature::VpnPlus
+        | Feature::IdentityVerification => Tier::Monthly,
     }
 }
 

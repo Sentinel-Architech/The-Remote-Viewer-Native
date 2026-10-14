@@ -36,3 +36,4 @@ pub mod platform;
 pub mod render;
 pub mod router;
 pub mod screen;
+pub mod verify_ui;
