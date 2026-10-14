@@ -36,7 +36,9 @@
 - Each Remote Viewer gets their own TRV-exclusive wallet: `Wallet` with funds balance and TRV token balance, on-device only.
 - **Self-custody** (decided 2026-10-13): each Remote Viewer is 100% in charge of their own crypto wallet — TRV never takes custody. Wallets are exclusively TRV.
 - Flows modeled: `add_funds`, `buy_trv` (stub conversion at a given rate), `send_within_network` (no fee), `transfer_to_platform` (deducts full amount, returns the TRV fee owed).
+- **Transfer-fee policy** (implemented as constants): **25% to TRV when relocating TRV tokens to an outside wallet — decided 2026-10-13.**
 - **Transfer-fee policy** (implemented as constants): **25% to TRV when relocating TRV tokens to an outside wallet — decided 2026-10-13.** TRV token intended as Solana blockchain crypto (aligns with the Solana-for-token plan). No TRV tokens move to another platform without this transfer fee to TRV. The quote computation is local; **no transfer actually settles anywhere** — settlement infrastructure does not exist yet. The previous 50 bps value was a code placeholder, not policy, and is being replaced with the decided 25%.
+- **AR earnings** (decided 2026-10-13): TRV tokens gathered through AR are credited to the viewer's TRV wallet, spendable on profile customization and other Network purchases.
 
 **AR token earning** (not implemented): geolocated TRV tokens earned like an adult Pokémon Go (no cartoon animation), stored in the TRV-native wallet. Anti-spoofing, geolocation-proof, and wallet persistence are undefined.
 
