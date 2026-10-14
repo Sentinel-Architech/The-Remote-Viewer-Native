@@ -1028,6 +1028,233 @@ fn ghost_status(ledger: &GhostLedger, now: u64) -> ViewerStatus {
     }
 }
 
+// ---------------------------------------------------------------------------
+// First-month 50% discount for new Remote Viewers
+// ---------------------------------------------------------------------------
+
+/// First-month discount percent for new Remote Viewers (user rule
+/// 2026-10-14): **50% off the first month on every paid tier**
+/// (Tier 1/2/3), for the viewer's first purchase only. Renewals are
+/// full price.
+pub const FIRST_MONTH_DISCOUNT_PERCENT: u32 = 50;
+
+/// Apply `percent_off` (0..=100) to a cent price with buyer-friendly
+/// rounding: the DISCOUNT amount rounds half-up, so a fractional cent
+/// of discount always lands in the buyer's favor (the price rounds
+/// down). Integer math only — no float money math.
+fn apply_percent_off_buyer_friendly(price_cents: u32, percent_off: u32) -> u32 {
+    let pct = percent_off.min(100);
+    let price = u64::from(price_cents);
+    // Discount rounds half-up: (price * pct + 50) / 100.
+    let discount = (price * u64::from(pct) + 50) / 100;
+    price_cents.saturating_sub(discount as u32)
+}
+
+impl PaidTier {
+    /// First-month price for a MONTHLY purchase by a new viewer: 50%
+    /// off the standard monthly price
+    /// ([`FIRST_MONTH_DISCOUNT_PERCENT`]), buyer-friendly rounding.
+    ///
+    /// Tier 1: $10.00 -> $5.00; Tier 2: $25.00 -> $12.50; Tier 3:
+    /// $45.00 -> $22.50. Renewals after the first month are full
+    /// price.
+    pub fn first_month_monthly_cents(self) -> u32 {
+        apply_percent_off_buyer_friendly(self.monthly_cents(), FIRST_MONTH_DISCOUNT_PERCENT)
+    }
+}
+
+/// Price in cents the viewer pays NOW for a subscription purchase.
+///
+/// - `billing` must be [`Tier::Monthly`] or [`Tier::Yearly`];
+///   [`Tier::Free`] and [`Tier::Founding`] are not purchases and
+///   return `None`.
+/// - First purchase (`is_first_purchase == true`): 50% off the first
+///   month ([`FIRST_MONTH_DISCOUNT_PERCENT`]). Monthly billing charges
+///   the discounted month; yearly billing charges the yearly price
+///   minus 50% of one prorated month (`yearly / 12`).
+/// - Renewal (`is_first_purchase == false`): the full period price.
+///   Yearly renewals still honor the single-best yearly discount
+///   ([`PaidTier::best_yearly_price_cents`]).
+/// - Ghost escalation fees are a separate track and are NEVER
+///   discounted by this function.
+///
+/// The caller decides `is_first_purchase` from
+/// [`FirstMonthLedger::claim_first_month`]: it returns `true` (and
+/// records the claim) only for an identity that has never claimed.
+///
+/// STACKING — undecided, documented (2026-10-14): the 50%
+/// first-month discount and the yearly discounts (20% category /
+/// 17.67% citizen) overlap on a first YEARLY purchase. This
+/// implementation applies the existing non-stacking yearly rule
+/// FIRST ([`PaidTier::best_yearly_price_cents`], largest single
+/// discount wins), then takes 50% off the prorated first month of
+/// that discounted total. The user has not decided whether these
+/// should combine differently; until they do, no other combination
+/// is applied.
+///
+/// Monthly category discounts are also unpriced: [`DiscountCategory`]
+/// flags monthly eligibility, but no monthly category price exists,
+/// so the 50% first-month applies to the standard monthly price.
+/// Whether a future monthly category price would stack is likewise
+/// undecided.
+pub fn purchase_price_cents(
+    paid_tier: PaidTier,
+    billing: Tier,
+    is_first_purchase: bool,
+    category: Option<DiscountCategory>,
+    citizen: bool,
+) -> Option<u32> {
+    match billing {
+        Tier::Monthly => {
+            let monthly = paid_tier.monthly_cents();
+            Some(if is_first_purchase {
+                apply_percent_off_buyer_friendly(monthly, FIRST_MONTH_DISCOUNT_PERCENT)
+            } else {
+                monthly
+            })
+        }
+        Tier::Yearly => {
+            let yearly = paid_tier.best_yearly_price_cents(category, citizen);
+            if !is_first_purchase {
+                return Some(yearly);
+            }
+            // Prorated one-month share of the (possibly discounted)
+            // yearly total, rounded half-up; then 50% off that share,
+            // discount rounded half-up (buyer-friendly). The rest of
+            // the year is full price.
+            let month_share = ((u64::from(yearly) + 6) / 12) as u32;
+            let discount =
+                ((u64::from(month_share) * u64::from(FIRST_MONTH_DISCOUNT_PERCENT) + 50) / 100)
+                    as u32;
+            Some(yearly.saturating_sub(discount))
+        }
+        Tier::Free | Tier::Founding => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// First-month discount ledger: one claim per verified identity
+// ---------------------------------------------------------------------------
+
+/// Magic bytes for the first-month ledger file.
+const FIRST_MONTH_MAGIC: &[u8; 4] = b"TRVD";
+/// First-month ledger file format version.
+const FIRST_MONTH_VERSION: u8 = 1;
+/// Fixed header length: magic(4) + version(1) + claim count(8).
+const FIRST_MONTH_HEADER_LEN: usize = 13;
+/// One claimed identity public key: 32 bytes.
+const FIRST_MONTH_KEY_LEN: usize = 32;
+
+/// Tracks which verified identities already claimed the first-month
+/// 50% discount — the anti-abuse choke point.
+///
+/// Rule (2026-10-14): the discount is claimed ONCE PER VERIFIED
+/// IDENTITY, keyed by the identity's Ed25519 public key (32 bytes,
+/// e.g. `trv_core::crypto::ed25519::PublicKey::as_bytes()`). The
+/// caller MUST pass the key of the verified identity making the
+/// purchase — never a device-generated throwaway.
+///
+/// Burn-and-restart: per the ghost policy a viewer may burn an
+/// account and start over. A fresh account carries a fresh keypair,
+/// so this ledger alone cannot link the new account to the old one.
+/// Full cross-account enforcement needs the verification layer to
+/// bind the State ID (or its attestation) to the discount claim and
+/// refuse re-claims for an already-used State ID — that binding is
+/// future work. What this ledger guarantees: the same verified
+/// identity key can never claim twice, and a corrupt ledger fails
+/// closed (no discount) instead of silently resetting.
+///
+/// Persist with [`FirstMonthLedger::save`]; the file holds no secrets
+/// (public keys only) so it is not encrypted, but writes are atomic
+/// and a corrupt file is an error, never a silent reset.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FirstMonthLedger {
+    claimed: std::collections::HashSet<[u8; 32]>,
+}
+
+impl FirstMonthLedger {
+    /// An empty ledger: no identity has claimed yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether this identity public key already claimed the discount.
+    pub fn has_claimed(&self, identity_pubkey: &[u8; 32]) -> bool {
+        self.claimed.contains(identity_pubkey)
+    }
+
+    /// Attempt to claim the first-month discount for this identity
+    /// public key.
+    ///
+    /// Returns `true` — and records the claim — only when this
+    /// identity has never claimed before: the purchase gets the 50%
+    /// first-month price. Returns `false` when the identity already
+    /// claimed: full price, no discount. The caller feeds the result
+    /// into [`purchase_price_cents`] as `is_first_purchase`.
+    pub fn claim_first_month(&mut self, identity_pubkey: &[u8; 32]) -> bool {
+        self.claimed.insert(*identity_pubkey)
+    }
+
+    /// Number of identities that have claimed.
+    pub fn claims_count(&self) -> usize {
+        self.claimed.len()
+    }
+
+    /// Persist the ledger atomically (temp + fsync + rename, same
+    /// pattern as [`GhostLedger::save`]).
+    pub fn save(&self, path: &Path) -> Result<(), LedgerError> {
+        let mut keys: Vec<[u8; 32]> = self.claimed.iter().copied().collect();
+        keys.sort_unstable();
+        let mut buf = Vec::with_capacity(FIRST_MONTH_HEADER_LEN + keys.len() * FIRST_MONTH_KEY_LEN);
+        buf.extend_from_slice(FIRST_MONTH_MAGIC);
+        buf.push(FIRST_MONTH_VERSION);
+        buf.extend_from_slice(&(keys.len() as u64).to_be_bytes());
+        for k in &keys {
+            buf.extend_from_slice(k);
+        }
+        atomic_write_ledger(path, &buf)
+    }
+
+    /// Load a persisted ledger. Fails closed on missing file, bad
+    /// magic, wrong length, or unknown version — never a silent
+    /// reset (a reset would re-grant discounts).
+    pub fn load(path: &Path) -> Result<Self, LedgerError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| LedgerError::Io(format!("first-month ledger read failed: {e}")))?;
+        if bytes.len() < FIRST_MONTH_HEADER_LEN
+            || (bytes.len() - FIRST_MONTH_HEADER_LEN) % FIRST_MONTH_KEY_LEN != 0
+        {
+            return Err(LedgerError::Corrupt(format!(
+                "bad length {}: not a whole number of keys",
+                bytes.len()
+            )));
+        }
+        if &bytes[0..4] != FIRST_MONTH_MAGIC {
+            return Err(LedgerError::Corrupt("bad magic".to_string()));
+        }
+        if bytes[4] != FIRST_MONTH_VERSION {
+            return Err(LedgerError::UnsupportedVersion(bytes[4]));
+        }
+        let mut count_bytes = [0u8; 8];
+        count_bytes.copy_from_slice(&bytes[5..13]);
+        let count = u64::from_be_bytes(count_bytes) as usize;
+        let keys_in_file = (bytes.len() - FIRST_MONTH_HEADER_LEN) / FIRST_MONTH_KEY_LEN;
+        if count != keys_in_file {
+            return Err(LedgerError::Corrupt(format!(
+                "header claims {count} keys, file holds {keys_in_file}"
+            )));
+        }
+        let mut claimed = std::collections::HashSet::with_capacity(count);
+        for i in 0..count {
+            let start = FIRST_MONTH_HEADER_LEN + i * FIRST_MONTH_KEY_LEN;
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes[start..start + FIRST_MONTH_KEY_LEN]);
+            claimed.insert(k);
+        }
+        Ok(FirstMonthLedger { claimed })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1949,5 +2176,293 @@ mod tests {
             viewer_status(Some(ent), Some(&ledger), now),
             ViewerStatus::Active { .. }
         ));
+    }
+
+    /// Integration: a ghost user's full journey through the paywall.
+    ///
+    /// Walks a never-paid user through: denied gated features, ghost fee
+    /// accumulation across billing ticks, and the ledger/pool state after.
+    /// This is the end-to-end proof that the second paywall audit's
+    /// requirements hold: gates deny, ticks collect, nothing is skipped.
+    #[test]
+    fn ghost_user_journey_denied_then_billed() {
+        use crate::gates::{can_access, Feature};
+
+        let start = 1_700_000_000u64;
+        let ghost_since = start;
+
+        // 1. Ghost user (no entitlement): all paid features deny.
+        // Note: can_access denies EVERYTHING with None — even VpnBasic
+        // needs at least a Free-tier entitlement object, not absence.
+        let no_ent: Option<crate::entitlement::Entitlement> = None;
+        assert!(!can_access(Feature::UnlimitedEi, no_ent));
+        assert!(!can_access(Feature::Messaging, no_ent));
+        assert!(!can_access(Feature::IdentityVerification, no_ent));
+        assert!(!can_access(Feature::VpnBasic, no_ent));
+
+        // 2. ViewerStatus reflects ghost with no fees yet (within 30-day grace).
+        let ledger = GhostLedger::new(ghost_since);
+        let status = viewer_status(no_ent, Some(&ledger), start + 10 * 86_400);
+        assert!(matches!(status, ViewerStatus::Ghost { months_unpaid: 0, .. }),
+            "ghost in grace period should show 0 months unpaid, got {:?}", status);
+
+        // 3. First billing tick after grace: 1 month collected ($5).
+        let mut ledger = GhostLedger::new(ghost_since);
+        let mut pool = CommunityPool::new();
+        let t1 = start + 31 * 86_400; // just past 30-day grace
+        let outcome = BillingTick::tick_at_startup(&mut ledger, &mut pool, t1)
+            .expect("tick must not fail closed here");
+        assert!(outcome.ran);
+        assert_eq!(outcome.months_collected, 1);
+        assert_eq!(outcome.total_cents, 500); // $5 first month
+        assert_eq!(pool.balance_cents(), 500);
+
+        // 4. Second tick a month later: escalation to $10.
+        let t2 = t1 + MONTH_SECS;
+        let outcome2 = BillingTick::tick_at_startup(&mut ledger, &mut pool, t2)
+            .expect("tick must not fail closed here");
+        assert_eq!(outcome2.months_collected, 1);
+        assert_eq!(outcome2.total_cents, 1000); // $10 second month
+        assert_eq!(pool.balance_cents(), 1500);
+
+        // 5. Idempotency: re-running the same tick collects nothing.
+        let outcome3 = BillingTick::tick_at_startup(&mut ledger, &mut pool, t2)
+            .expect("tick must not fail closed here");
+        assert!(outcome3.ran);
+        assert_eq!(outcome3.months_collected, 0);
+        assert_eq!(pool.balance_cents(), 1500);
+
+        // 6. Status before collection would show 2 months unpaid.
+        // (After our ticks collected both, unpaid is 0 — verify with a
+        // fresh ledger at the same timestamp.)
+        let fresh_ledger = GhostLedger::new(ghost_since);
+        let status = viewer_status(no_ent, Some(&fresh_ledger), t2);
+        match status {
+            ViewerStatus::Ghost { months_unpaid, next_fee_cents } => {
+                assert_eq!(months_unpaid, 2);
+                assert_eq!(next_fee_cents, 500); // $5 first uncollected month
+            }
+            other => panic!("expected Ghost status, got {:?}", other),
+        }
+        // And the collected ledger shows 0 unpaid (both months settled).
+        let status = viewer_status(no_ent, Some(&ledger), t2);
+        assert!(matches!(
+            status,
+            ViewerStatus::Ghost { months_unpaid: 0, .. }
+        ));
+
+        // 7. Ghost pays for verification: fresh entitlement → Active,
+        //    gates now allow. (Entitlement expiry must be in the future
+        //    relative to the REAL system clock, which check() uses.)
+        let far_future = 9_999_999_999u64; // year 2286
+        let ent = test_entitlement(far_future);
+        assert!(can_access(Feature::Messaging, Some(ent)));
+        assert!(can_access(Feature::IdentityVerification, Some(ent)));
+        let status = viewer_status(Some(ent), Some(&ledger), t2);
+        assert!(matches!(status, ViewerStatus::Active { .. }));
+    }
+
+    // ---- First-month 50% discount ----
+
+    #[test]
+    fn first_month_discount_constant_is_fifty() {
+        assert_eq!(FIRST_MONTH_DISCOUNT_PERCENT, 50);
+    }
+
+    #[test]
+    fn new_viewer_gets_half_off_monthly_all_tiers() {
+        // Tier 1: $10.00 -> $5.00; Tier 2: $25.00 -> $12.50;
+        // Tier 3: $45.00 -> $22.50.
+        assert_eq!(PaidTier::Tier1.first_month_monthly_cents(), 500);
+        assert_eq!(PaidTier::Tier2.first_month_monthly_cents(), 1250);
+        assert_eq!(PaidTier::Tier3.first_month_monthly_cents(), 2250);
+    }
+
+    #[test]
+    fn buyer_friendly_rounding_rounds_discount_up() {
+        // Odd-cent price: 50% of 101 = 50.5 -> discount rounds UP to
+        // 51 (buyer-friendly), price 50.
+        assert_eq!(apply_percent_off_buyer_friendly(101, 50), 50);
+        // 33% of 100 = 33.33 -> discount 33, price 67.
+        assert_eq!(apply_percent_off_buyer_friendly(100, 33), 67);
+        // 0% off and 100% off behave.
+        assert_eq!(apply_percent_off_buyer_friendly(999, 0), 999);
+        assert_eq!(apply_percent_off_buyer_friendly(999, 100), 0);
+        // Percent clamps at 100.
+        assert_eq!(apply_percent_off_buyer_friendly(999, 150), 0);
+    }
+
+    #[test]
+    fn purchase_price_monthly_first_vs_renewal() {
+        for tier in [PaidTier::Tier1, PaidTier::Tier2, PaidTier::Tier3] {
+            // First purchase: half off the month.
+            assert_eq!(
+                purchase_price_cents(tier, Tier::Monthly, true, None, false),
+                Some(tier.monthly_cents() / 2)
+            );
+            // Renewal: full monthly price.
+            assert_eq!(
+                purchase_price_cents(tier, Tier::Monthly, false, None, false),
+                Some(tier.monthly_cents())
+            );
+        }
+    }
+
+    #[test]
+    fn purchase_price_yearly_first_purchase_prorates_first_month() {
+        // Tier 1 yearly $100: prorated month = 833c, half = 417c off.
+        // 10000 - 417 = 9583.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Yearly, true, None, false),
+            Some(9583)
+        );
+        // Tier 2 yearly $150: month = 1250c, half = 625c off -> 14375.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier2, Tier::Yearly, true, None, false),
+            Some(14375)
+        );
+        // Tier 3 yearly $200: month = 1667c, half = 834c off -> 19166.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier3, Tier::Yearly, true, None, false),
+            Some(19166)
+        );
+        // Yearly renewals are full price.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Yearly, false, None, false),
+            Some(10000)
+        );
+    }
+
+    #[test]
+    fn purchase_price_yearly_first_purchase_with_citizen_discount() {
+        // Citizen Tier 1: best yearly = 8233. Month share = 686c,
+        // half = 343c off -> 7890. Documents the stacking rule:
+        // yearly discount first, then 50% off the prorated month.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Yearly, true, None, true),
+            Some(7890)
+        );
+        // Citizen renewal: the plain citizen yearly price.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Yearly, false, None, true),
+            Some(8233)
+        );
+    }
+
+    #[test]
+    fn purchase_price_rejects_non_purchases() {
+        // Free/Founding are not purchases.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Free, true, None, false),
+            None
+        );
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Founding, false, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn first_month_ledger_claims_once_per_identity() {
+        let mut ledger = FirstMonthLedger::new();
+        let alice = [0xA1u8; 32];
+        let bob = [0xB2u8; 32];
+        // First claim succeeds: discount applies.
+        assert!(ledger.claim_first_month(&alice));
+        assert!(ledger.has_claimed(&alice));
+        // Same identity again: no discount.
+        assert!(!ledger.claim_first_month(&alice));
+        assert!(!ledger.claim_first_month(&alice));
+        // A different identity still gets its own first claim.
+        assert!(ledger.claim_first_month(&bob));
+        assert_eq!(ledger.claims_count(), 2);
+    }
+
+    #[test]
+    fn burned_account_same_identity_gets_no_second_discount() {
+        // The abuse case: a viewer burns their account and comes back
+        // with the SAME verified identity key. The ledger refuses the
+        // second claim.
+        let mut ledger = FirstMonthLedger::new();
+        let identity_key = [0x1Du8; 32];
+        assert!(ledger.claim_first_month(&identity_key));
+        // "New" account, same verified identity -> no discount.
+        assert!(!ledger.claim_first_month(&identity_key));
+        let price = purchase_price_cents(
+            PaidTier::Tier2,
+            Tier::Monthly,
+            ledger.claim_first_month(&identity_key),
+            None,
+            false,
+        );
+        assert_eq!(price, Some(2500)); // full price, no 50% off
+    }
+
+    #[test]
+    fn ghost_fees_never_discounted() {
+        // The first-month discount is a purchase-track rule only.
+        // Ghost escalation fees are untouched: same schedule as ever.
+        let ghost_since = 1_700_000_000u64;
+        let ghost = GhostAccount::new(ghost_since);
+        // Month 1 after grace: $5; month 2: $10.
+        assert_eq!(
+            ghost.monthly_fee_cents(ghost_since + 45 * 86_400),
+            Some(500)
+        );
+        assert_eq!(
+            ghost.monthly_fee_cents(ghost_since + 75 * 86_400),
+            Some(1000)
+        );
+        // And purchase_price_cents has no ghost path at all: Free
+        // (the ghost-adjacent tier) is not a purchase.
+        assert_eq!(
+            purchase_price_cents(PaidTier::Tier1, Tier::Free, true, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn first_month_ledger_persists_across_restarts() {
+        let dir = std::env::temp_dir().join("trv-first-month-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("claims.trvl");
+        let _ = std::fs::remove_file(&path);
+        let mut ledger = FirstMonthLedger::new();
+        let alice = [0xA1u8; 32];
+        let bob = [0xB2u8; 32];
+        assert!(ledger.claim_first_month(&alice));
+        assert!(ledger.claim_first_month(&bob));
+        ledger.save(&path).expect("save works");
+        let loaded = FirstMonthLedger::load(&path).expect("load works");
+        assert!(loaded.has_claimed(&alice));
+        assert!(loaded.has_claimed(&bob));
+        assert!(!loaded.has_claimed(&[0xC3u8; 32]));
+        // Claims survive: no re-grant after restart.
+        let mut loaded = loaded;
+        assert!(!loaded.claim_first_month(&alice));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn first_month_ledger_load_fails_closed() {
+        let dir = std::env::temp_dir().join("trv-first-month-test");
+        let _ = std::fs::create_dir_all(&dir);
+        // Missing file.
+        assert!(FirstMonthLedger::load(&dir.join("nope.trvl")).is_err());
+        // Bad magic.
+        let bad = dir.join("bad.trvl");
+        std::fs::write(&bad, b"XXXX\x01garbage").unwrap();
+        assert!(FirstMonthLedger::load(&bad).is_err());
+        // Header count lies about the key count.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"TRVD");
+        buf.push(1);
+        buf.extend_from_slice(&5u64.to_be_bytes()); // claims 5...
+        buf.extend_from_slice(&[0xABu8; 32]); // ...holds 1
+        let lying = dir.join("lying.trvl");
+        std::fs::write(&lying, &buf).unwrap();
+        assert!(FirstMonthLedger::load(&lying).is_err());
+        let _ = std::fs::remove_file(&bad);
+        let _ = std::fs::remove_file(&lying);
     }
 }
