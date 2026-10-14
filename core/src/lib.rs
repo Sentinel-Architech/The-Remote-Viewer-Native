@@ -21,4 +21,5 @@ pub mod ratelimit;
 pub mod sentinel;
 pub mod sharing;
 pub mod transport;
+pub mod verify;
 pub mod wallet;
