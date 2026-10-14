@@ -1,7 +1,4 @@
 [package]
-# Remote note: the old skeleton src/main.rs was removed upstream and this
-# API cannot delete files; disable autobins so cargo ignores that stale path.
-autobins = false
 name = "trv-backend"
 version.workspace = true
 edition.workspace = true
