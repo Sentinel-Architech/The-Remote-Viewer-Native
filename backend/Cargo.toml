@@ -1,11 +1,12 @@
 [package]
-name = "trv_backend"
-version = "0.1.0"
-edition = "2021"
+# Remote note: the old skeleton src/main.rs was removed upstream and this
+# API cannot delete files; disable autobins so cargo ignores that stale path.
+autobins = false
+name = "trv-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Remote Viewer native backend: local-first store, profile vault, tier entitlements. No Node, no network."
 
 [dependencies]
-tokio = { version = "1.38", features = ["full"] }
-axum = "0.7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-rusqlite = { version = "0.31", features = ["bundled"] }
+trv-core = { path = "../core" }
