@@ -32,7 +32,7 @@
 
 **Ghost tax** (decided 2026-10-13): after 30 days as an unverified ghost, a monthly fee applies — $5 first month, $10 second month, +$5 each month after — until they verify ID and pay for a tier, or burn their account and start from scratch. (Policy only; no fee collection or account-burn mechanism implemented.)
 
-**Referral reward** (decided 2026-10-13): for each new RV registered via a friend's QR code, the referrer gets $5 in TRV coin — redeemable only after the friend pays for verification, and must be redeemed within 1 week but no later than 2 weeks after. (Policy only; no referral tracking or redemption mechanism implemented.)
+**Referral reward** (decided 2026-10-13): for each new RV registered via a friend's QR code, the referrer gets $5 in TRV coin — redeemable only after the friend pays for verification, and must be redeemed within 1 week but no later than 2 weeks after. Paid on the Solana blockchain. (Policy only; no referral tracking or redemption mechanism implemented.)
 
 ## 2. TRV Token Economics
 
