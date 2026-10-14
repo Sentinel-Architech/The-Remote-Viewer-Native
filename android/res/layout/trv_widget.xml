@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TRV home-screen widget layout. Dark theme, green accents.
+     RemoteViews supports only a subset of views: LinearLayout, TextView,
+     ProgressBar (among others) are all safe here. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#0B120B">
+
+    <TextView
+        android:id="@+id/widget_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="TRV Build"
+        android:textColor="#39FF6A"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_headline"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="14 of 22 done"
+        android:textColor="#C9E8C9"
+        android:textSize="12sp" />
+
+    <ProgressBar
+        android:id="@+id/widget_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:max="100"
+        android:progress="64"
+        android:progressTint="#39FF6A"
+        android:progressBackgroundTint="#1E2B1E" />
+
+    <TextView
+        android:id="@+id/widget_row1"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Done: 14"
+        android:textColor="#9FBF9F"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/widget_row2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Next: 8"
+        android:textColor="#9FBF9F"
+        android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/widget_row3"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Tests: 333 passing"
+        android:textColor="#9FBF9F"
+        android:textSize="11sp" />
+
+</LinearLayout>

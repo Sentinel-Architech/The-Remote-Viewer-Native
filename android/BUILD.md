@@ -154,6 +154,58 @@ A ready-to-place workflow is in
 - Single screen (Sentinel chat). Feed, wallet, AR, games plug into the
   same `Screen` trait later — no re-architecture needed.
 
+## Home-screen widget (TRV Progress → network-health dashboard)
+
+`android/java/network/remoteviewer/trv/` holds the first Java in the
+project:
+
+- `TrvWidgetProvider.java` — `AppWidgetProvider`; renders whatever
+  `TrvWidgetData.snapshot()` returns into `res/layout/trv_widget.xml`.
+- `TrvWidgetData.java` — the data source. **Hardcoded snapshot today**
+  (14 done / 8 next / 333 tests, 2026-10-14); the `TODO(live-data)` comment
+  marks where the live feed plugs in. The snapshot shape (title, headline,
+  3 rows, 0..1 progress) is deliberately generic so the same widget later
+  shows network health / trends / topics with no provider or layout change.
+- Rust side: `android/src/widget.rs` defines the `WidgetDataSource` trait
+  and mirrors the snapshot — keep the two in sync until the JNI/state-file
+  feed lands.
+
+Widget resources: `android/res/layout/trv_widget.xml`,
+`android/res/xml/trv_widget_info.xml`, `android/res/values/strings.xml`.
+Registered as a `<receiver>` in `AndroidManifest.xml`.
+
+### APK assembly with Java (extends the aapt2 steps above)
+
+```sh
+BT=/tmp/sdk/build-tools/${BUILD_TOOLS}
+AJAR=/tmp/sdk/platforms/android-${TARGET_SDK}/android.jar
+
+# 1. Compile resources (NEW — res/ dir now exists)
+/tmp/sdk/build-tools/${BUILD_TOOLS}/aapt2 compile --dir android/res -o /tmp/compiled_res.zip
+
+# 2. Compile Java (needs a JDK; d8 ships in build-tools)
+mkdir -p /tmp/java_classes /tmp/dex
+javac -source 8 -target 8 -cp "$AJAR" -d /tmp/java_classes \
+  $(find android/java -name '*.java')
+/tmp/sdk/build-tools/${BUILD_TOOLS}/d8 --min-api 26 \
+  --output /tmp/dex /tmp/java_classes/network/remoteviewer/trv/*.class
+
+# 3. Link (add --java for R.java so TrvWidgetProvider resolves R.layout)
+"$BT/aapt2" link -o /tmp/base.apk -I "$AJAR" \
+  --manifest android/AndroidManifest.xml \
+  --min-sdk-version 26 --target-sdk-version 34 \
+  -A /tmp/compiled_res.zip --java /tmp/gen
+
+# 4. Add native libs AND classes.dex before zipalign
+mkdir -p /tmp/apk/lib/arm64-v8a
+cp target/aarch64-linux-android/release/libtrv_android.so /tmp/apk/lib/arm64-v8a/
+cp /tmp/dex/classes.dex /tmp/apk/
+cd /tmp/apk && zip -q -r /tmp/base.apk .
+```
+
+No Gradle, still no Play Services. `android:hasCode="true"` was already
+set in the manifest.
+
 ## Dependencies added
 
 **None.** The workspace remains at zero external Rust dependencies.

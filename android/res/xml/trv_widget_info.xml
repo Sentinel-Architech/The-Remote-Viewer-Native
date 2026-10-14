@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AppWidgetProviderInfo for the TRV widget.
+     updatePeriodMillis is a hint the system clamps to >= 30 min; the real
+     live-update path is the app pushing snapshots through
+     TrvWidgetProvider.updateWidget() whenever fresh data lands. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="110dp"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/trv_widget"
+    android:description="@string/trv_widget_desc"
+    android:widgetCategory="home_screen"
+    android:resizeMode="horizontal|vertical" />

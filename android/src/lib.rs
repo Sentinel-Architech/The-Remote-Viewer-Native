@@ -15,6 +15,7 @@ pub const APP_NAME: &str = "The Remote Viewer Network";
 pub const LIB_NAME: &str = "trv_android";
 
 pub mod keys;
+pub mod widget;
 
 #[cfg(target_os = "android")]
 mod app;
