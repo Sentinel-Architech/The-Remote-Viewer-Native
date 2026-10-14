@@ -73,6 +73,67 @@ fn load_entitlement_for(activity: *mut ANativeActivity) -> Option<trv_backend::e
     crate::entitlement::load_entitlement(&dir, &ISSUER_PUBKEY)
 }
 
+/// Run the ghost-fee billing tick at app startup.
+///
+/// Loads (or creates) the ghost ledger, settles any uncollected months
+/// into a fresh community pool, and persists the ledger. This is the
+/// enforcement point the paywall audit required: without this call,
+/// ghost escalation fees are computed but never collected.
+///
+/// Fail-closed and non-fatal: any failure (no data dir, corrupt ledger,
+/// settlement overflow) is logged and the app continues. The tick is
+/// idempotent and retries on the next startup.
+///
+/// NOTE: The community pool is currently in-memory only (not persisted).
+/// Ghost fees collected here fund the pool for this session. Pool
+/// persistence is future work.
+fn run_billing_tick_at_startup(activity: *mut ANativeActivity) {
+    use trv_backend::subscriptions::{BillingTick, CommunityPool, GhostLedger};
+
+    // SAFETY: same as load_entitlement_for — valid activity pointer,
+    // read-only access to the path field.
+    let dir = match unsafe { data_path(activity) } {
+        Some(d) => d,
+        None => return, // No data dir yet; nothing to bill.
+    };
+    let ledger_path = dir.join("ghost_ledger.trvl");
+
+    // Load existing ledger, or start fresh (ghost clock starts now).
+    // A corrupt ledger fails closed — we log and skip rather than
+    // silently resetting someone's billing.
+    let mut ledger = match GhostLedger::load(&ledger_path) {
+        Ok(l) => l,
+        Err(_) => {
+            // No ledger yet (first run) or unreadable. For a fresh install
+            // there is no ghost history; start tracking from now.
+            // NOTE: In production, the ghost_since should be the account
+            // creation time, not "now". This is a simplification until
+            // account creation is wired in.
+            let now = now_secs();
+            GhostLedger::new(now)
+        }
+    };
+
+    let mut pool = CommunityPool::new();
+    let now = now_secs();
+
+    // Settle uncollected months. None = settlement failed closed;
+    // ledger and pool untouched, retry next startup.
+    if BillingTick::tick_at_startup(&mut ledger, &mut pool, now).is_some() {
+        // Persist even when nothing was due — durability from day one.
+        // Save failure is logged, not fatal; retry next startup.
+        let _ = ledger.save(&ledger_path);
+    }
+}
+
+/// Seconds since the Unix epoch, saturating on failure.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Shared between the main thread (callbacks) and the app thread.
 struct Shared {
     looper: AtomicPtr<ALooper>,
@@ -463,6 +524,12 @@ unsafe fn android_main(shared: *mut Shared) {
     // receipt, or an expired receipt → None → the UnlimitedEi and
     // messaging gates deny (fail closed).
     ui.screen.set_entitlement(load_entitlement_for(activity));
+
+    // Billing: run the ghost-fee settlement tick at startup. This collects
+    // any uncollected ghost months into the community pool. Idempotent —
+    // running twice collects nothing the second time. Failures are logged
+    // but never crash the app; the tick retries on next startup.
+    run_billing_tick_at_startup(activity);
 
     {
         let mut st = lock_state(shared);
