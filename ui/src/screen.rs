@@ -10,6 +10,12 @@ use crate::font::{GLYPH_H, GLYPH_W};
 use crate::model::{Author, ChatSession};
 use crate::platform::{PixelScreen, Screen, TextScreen, UiEvent};
 use crate::render::{self, color};
+use trv_backend::entitlement::Entitlement;
+use trv_backend::gates::{can_access, Feature};
+
+/// Shown when the UnlimitedEi gate denies a Sentinel submit.
+pub const DENIED_MSG: &str =
+    "Entitlement required for unlimited Sentinel use. Verify your receipt to continue.";
 
 /// Pixel layout of the chat screen, derived from the drawable size.
 #[derive(Debug, Clone, Copy)]
@@ -63,11 +69,18 @@ impl Layout {
 }
 
 /// The v0.1 main screen: a chat with the on-device Sentinel.
+///
+/// The Sentinel is the [`Feature::UnlimitedEi`] gated capability: every
+/// submit consults [`can_access`] and fails closed without a live
+/// issuer-signed entitlement. A fresh screen starts with no entitlement
+/// (denied); the embedding app presents one via
+/// [`SentinelScreen::set_entitlement`] after verifying the receipt.
 pub struct SentinelScreen {
     chat: ChatSession,
     scroll: u32, // lines scrolled up from the bottom
     w: u32,
     h: u32,
+    entitlement: Option<Entitlement>,
 }
 
 impl SentinelScreen {
@@ -77,7 +90,14 @@ impl SentinelScreen {
             scroll: 0,
             w: w.max(64),
             h: h.max(64),
+            entitlement: None,
         }
+    }
+
+    /// Present (or replace) the entitlement, e.g. after the viewer
+    /// verifies a new receipt. `None` revokes access immediately.
+    pub fn set_entitlement(&mut self, entitlement: Option<Entitlement>) {
+        self.entitlement = entitlement;
     }
 
     pub fn chat(&self) -> &ChatSession {
@@ -96,6 +116,22 @@ impl SentinelScreen {
     }
 
     fn submit(&mut self) {
+        // UnlimitedEi gate: fail closed without a live entitlement. The
+        // input is kept so the viewer can retry after entitling, and the
+        // denial is shown once (not spammed on every Enter).
+        if !can_access(Feature::UnlimitedEi, self.entitlement) {
+            let already_shown = self
+                .chat
+                .messages()
+                .back()
+                .map(|m| m.text == DENIED_MSG)
+                .unwrap_or(false);
+            if !already_shown {
+                self.chat.push(Author::Sentinel, DENIED_MSG);
+                self.scroll = 0;
+            }
+            return;
+        }
         if self.chat.submit() {
             self.scroll = 0; // new answer: jump to bottom
         }
@@ -266,6 +302,47 @@ impl TextScreen for SentinelScreen {
 mod tests {
     use super::*;
     use crate::platform::{Screen, UiEvent};
+    use trv_backend::entitlement::{issue, verify_and_check};
+    use trv_backend::subscriptions::Tier;
+
+    /// Fixed issuer seed for tests only — never a real key.
+    const ISSUER_SEED: [u8; 32] = *b"test-ui-screen-issuer-0000000000";
+
+    fn issuer_pubkey() -> [u8; 32] {
+        let (_, public) = trv_core::crypto::ed25519::generate(&ISSUER_SEED);
+        *public.as_bytes()
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .expect("test clock")
+    }
+
+    fn live_entitlement() -> Entitlement {
+        let now = now_secs();
+        let receipt = issue(&ISSUER_SEED, Tier::Monthly, now, now + 30 * 86_400)
+            .expect("issue");
+        verify_and_check(&issuer_pubkey(), &receipt).expect("live")
+    }
+
+    fn expired_entitlement() -> Entitlement {
+        let now = now_secs();
+        let receipt = issue(&ISSUER_SEED, Tier::Monthly, now - 60 * 86_400, now - 3_600)
+            .expect("issue");
+        // Provenance is genuine; liveness is dead. verify_receipt (not
+        // verify_and_check) builds the Entitlement value so the test can
+        // prove the gate re-checks expiry.
+        trv_backend::entitlement::verify_receipt(&issuer_pubkey(), &receipt)
+            .expect("genuine")
+    }
+
+    fn entitled_screen() -> SentinelScreen {
+        let mut s = SentinelScreen::new("viewer", 640, 400);
+        s.set_entitlement(Some(live_entitlement()));
+        s
+    }
 
     fn type_text(s: &mut SentinelScreen, text: &str) {
         for c in text.chars() {
@@ -275,7 +352,7 @@ mod tests {
 
     #[test]
     fn enter_submits_and_answers() {
-        let mut s = SentinelScreen::new("viewer", 640, 400);
+        let mut s = entitled_screen();
         type_text(&mut s, "hello");
         s.on_event(UiEvent::Enter);
         assert_eq!(s.chat().messages().len(), 3); // greeting + you + sentinel
@@ -284,7 +361,7 @@ mod tests {
 
     #[test]
     fn tap_send_button_submits() {
-        let mut s = SentinelScreen::new("viewer", 640, 400);
+        let mut s = entitled_screen();
         type_text(&mut s, "hi");
         let lay = s.layout();
         let (sx, sy, sw, sh) = lay.send_rect();
@@ -319,7 +396,7 @@ mod tests {
 
     #[test]
     fn draw_text_renders_conversation() {
-        let mut s = SentinelScreen::new("viewer", 320, 200);
+        let mut s = entitled_screen();
         type_text(&mut s, "hello");
         s.on_event(UiEvent::Enter);
         let mut out = String::new();
@@ -343,5 +420,65 @@ mod tests {
         s.on_event(UiEvent::Resize(320, 200));
         let mut fb = vec![0u32; 320 * 200];
         s.draw(&mut fb, 320, 200);
+    }
+
+    #[test]
+    fn ghost_submit_denied_keeps_input() {
+        // No entitlement: the UnlimitedEi gate fails closed.
+        let mut s = SentinelScreen::new("viewer", 640, 400);
+        type_text(&mut s, "hello");
+        s.on_event(UiEvent::Enter);
+        // Greeting + denial; no user message echoed, no Sentinel answer.
+        assert_eq!(s.chat().messages().len(), 2);
+        assert_eq!(s.chat().messages()[1].text, DENIED_MSG);
+        // Input kept for retry after entitling.
+        assert_eq!(s.chat().input(), "hello");
+    }
+
+    #[test]
+    fn denial_not_spammed_on_repeated_enter() {
+        let mut s = SentinelScreen::new("viewer", 640, 400);
+        type_text(&mut s, "hello");
+        s.on_event(UiEvent::Enter);
+        s.on_event(UiEvent::Enter);
+        s.on_event(UiEvent::Enter);
+        let denials = s
+            .chat()
+            .messages()
+            .iter()
+            .filter(|m| m.text == DENIED_MSG)
+            .count();
+        assert_eq!(denials, 1);
+    }
+
+    #[test]
+    fn expired_entitlement_denied() {
+        let mut s = SentinelScreen::new("viewer", 640, 400);
+        s.set_entitlement(Some(expired_entitlement()));
+        type_text(&mut s, "hello");
+        s.on_event(UiEvent::Enter);
+        assert_eq!(s.chat().messages().len(), 2); // greeting + denial
+        assert_eq!(s.chat().messages()[1].text, DENIED_MSG);
+    }
+
+    #[test]
+    fn presenting_entitlement_later_unlocks() {
+        let mut s = SentinelScreen::new("viewer", 640, 400);
+        type_text(&mut s, "hello");
+        s.on_event(UiEvent::Enter);
+        assert_eq!(s.chat().messages().len(), 2); // denied
+        s.set_entitlement(Some(live_entitlement()));
+        // Input was kept, so this submit answers the original question.
+        s.on_event(UiEvent::Enter);
+        assert_eq!(s.chat().messages().len(), 4); // greeting, denial, you, sentinel
+    }
+
+    #[test]
+    fn revoking_entitlement_denies_immediately() {
+        let mut s = entitled_screen();
+        s.set_entitlement(None);
+        type_text(&mut s, "hello");
+        s.on_event(UiEvent::Enter);
+        assert_eq!(s.chat().messages().len(), 2); // greeting + denial
     }
 }

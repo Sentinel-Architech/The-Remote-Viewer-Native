@@ -118,9 +118,11 @@ impl Router {
         ));
     }
 
-    /// Replace the entitlement everywhere (chat send gate + list hint).
+    /// Replace the entitlement everywhere (sentinel UnlimitedEi gate,
+    /// chat send gate + list hint).
     pub fn set_entitlement(&mut self, entitlement: Option<Entitlement>) {
         self.entitlement = entitlement;
+        self.sentinel.set_entitlement(entitlement);
         if let Some(c) = self.conversations.as_mut() {
             c.set_entitlement(entitlement);
         }
@@ -463,5 +465,26 @@ mod tests {
         r.on_event(UiEvent::Escape);
         r.draw_text(&mut out, 60, 24);
         assert!(out.contains("locked"));
+    }
+
+    #[test]
+    fn sentinel_route_gated_by_entitlement() {
+        use crate::platform::TextScreen;
+        // No entitlement: the Sentinel submit is denied.
+        let mut r = Router::new("viewer", 320, 200);
+        type_text(&mut r, "hello");
+        r.on_event(UiEvent::Enter);
+        let mut out = String::new();
+        r.draw_text(&mut out, 60, 24);
+        assert!(out.contains("Entitlement required"));
+        // Presenting an entitlement unlocks the Sentinel route.
+        r.set_entitlement(Some(live_entitlement()));
+        let mut r2 = Router::new("viewer", 320, 200);
+        r2.set_entitlement(Some(live_entitlement()));
+        type_text(&mut r2, "hello");
+        r2.on_event(UiEvent::Enter);
+        let mut out2 = String::new();
+        r2.draw_text(&mut out2, 60, 24);
+        assert!(!out2.contains("Entitlement required"));
     }
 }
