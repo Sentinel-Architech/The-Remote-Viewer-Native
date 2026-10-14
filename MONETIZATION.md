@@ -28,6 +28,8 @@
 
 **Network exclusivity**: Access, content, and icon customization are exclusive to the TRV Network. Not paid-verified = anonymous ghost with no reach or signal. Research without a paid subscription shows only "low lights" behind a paywall. (Policy; enforcement not implemented.)
 
+**Ads policy** (decided 2026-10-13): Ghost tier gets native ads at 15 seconds per minute watched. No other tier gets ads. Native ads are served on-device, not via corporate ad networks. (Policy only; ad inventory, scheduling, and playback are not implemented.)
+
 ## 2. TRV Token Economics
 
 **Wallet** (implemented in `core/src/wallet.rs` — local state machine only):

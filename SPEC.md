@@ -77,6 +77,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - No monthly online OR yearly sub → no unlimited use. Weekly reset after 3 months of recurring monthly subscriptions.
 - Highest paid tiers: 4 free gas-fee-waiver minted NFTs to sell.
 - Founding Members: get 100% everything UNLIMITED if they've gone through GH to manually install (via dev mode terminal commands).
+- Ads policy (decided 2026-10-13): Ghost tier gets native ads at 15 seconds per minute watched. No other tier gets ads. Native ads are served on-device, not via corporate ad networks.
 
 ## 9. Install — One Tap
 - No one should NEED a terminal, not even the user themselves.
