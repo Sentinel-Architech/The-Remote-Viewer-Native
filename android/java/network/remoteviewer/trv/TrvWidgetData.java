@@ -57,7 +57,7 @@ public final class TrvWidgetData {
 
     /**
      * Current numbers, baked in at build time (2026-10-14 snapshot:
-     * 14 done / 8 next / 509 tests passing). Mirrors the Rust
+     * 14 done / 8 next / 575 tests passing). Mirrors the Rust
      * {@code BuildProgressSnapshot} — keep the two in sync.
      */
     public static Snapshot snapshot(Context context) {
@@ -71,7 +71,7 @@ public final class TrvWidgetData {
                 "14 of 22 done",
                 "Done: 14",
                 "Next: 8",
-                "Tests: 509 passing",
+                "Tests: 575 passing",
                 14f / 22f);
     }
 

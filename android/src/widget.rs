@@ -113,7 +113,7 @@ pub fn write_widget_snapshot() -> bool {
 /// Hardcoded build-progress snapshot (mirrors `TrvWidgetData.snapshot()`
 /// on the Java side — keep the two in sync).
 ///
-/// Numbers as of 2026-10-14: 14 done / 8 next / 509 tests passing across
+/// Numbers as of 2026-10-14: 14 done / 8 next / 575 tests passing across
 /// the main workspace, Solana, and all three game crates.
 pub struct BuildProgressSnapshot;
 
@@ -126,7 +126,7 @@ impl WidgetDataSource for BuildProgressSnapshot {
             rows: vec![
                 WidgetRow { label: "Done", value: "14".into() },
                 WidgetRow { label: "Next", value: "8".into() },
-                WidgetRow { label: "Tests", value: "509 passing".into() },
+                WidgetRow { label: "Tests", value: "575 passing".into() },
             ],
         }
     }
@@ -151,7 +151,7 @@ mod tests {
         for key in ["title", "headline", "row1", "row2", "row3", "progress", "updated"] {
             assert!(json.contains(&format!("\"{key}\":")), "missing key {key}");
         }
-        assert!(json.contains("\"Tests: 509 passing\""));
+        assert!(json.contains("\"Tests: 575 passing\""));
         assert!(json.contains("\"14 of 22 done\""));
         assert!(json.starts_with('{') && json.ends_with('}'));
     }
