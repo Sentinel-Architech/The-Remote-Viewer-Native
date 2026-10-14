@@ -53,6 +53,7 @@
 - **Creator paywalls** (confirmed 2026-10-13): creators can paywall their own content. Revenue split: **80% to creator, 20% to TRV**.
 - **Watermarks**: creators get watermarks that cannot be replaced. (Policy only; no implementation.)
 - **Live customization**: Myspace-style account customization with music, but ENHANCED — creator profiles drive this. (Not implemented.)
+- **NFT external sales** (decided 2026-10-13): NFTs can be sold outside TRV for a 20% fee to TRV. (Policy only; no marketplace or settlement implemented.)
 
 ## 4. What's Built vs What's Not
 
