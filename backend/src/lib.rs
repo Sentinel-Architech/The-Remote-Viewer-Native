@@ -11,3 +11,4 @@ pub mod profile;
 pub mod registration;
 pub mod store;
 pub mod subscriptions;
+pub mod throttle;

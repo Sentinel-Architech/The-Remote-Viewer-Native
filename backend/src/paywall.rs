@@ -8,6 +8,23 @@
 //!
 //! Gating is pure local computation over [`Tier`] and
 //! [`VerificationStatus`]; no network calls, no billing SDKs.
+//!
+//! ## Trust model
+//!
+//! Be explicit about what this gate does and does not promise:
+//!
+//! - `tier` and `verification` are **caller-supplied inputs**. This
+//!   module evaluates policy ("what may a viewer with this tier and
+//!   this verification state do?"), not provenance ("how do we know
+//!   they really have it?").
+//! - In this local-first architecture the viewer controls their own
+//!   device and its software. A modified client can therefore bypass
+//!   these checks entirely — nothing here is an enforcement boundary.
+//! - Server-side (or device-secure-enclave) attestation of tier and
+//!   verification state is a future step, not a current property. The
+//!   existing honesty about the activation-code checksum
+//!   ([`crate::activation`]) applies equally here: these are local
+//!   policy evaluations, not unforgeable guarantees.
 
 use crate::subscriptions::{unlimited_entitlement, Tier, VerificationStatus};
 

@@ -223,10 +223,31 @@ pub fn validate(code: &str, secret: &[u8]) -> Result<(Tier, u32), ActivationErro
         return Err(ActivationError::BadFormat);
     }
     let expected = checksum_segment(tier_seg, random_seg, secret);
-    if expected != checksum_seg {
+    // Constant-time equality: accumulate byte diffs with `|=` over the
+    // whole checksum and check once at the end, so rejection time does
+    // not leak how many leading chars were right. Both strings are
+    // CHECKSUM_LEN chars by the format check above.
+    if !constant_time_eq(expected.as_bytes(), checksum_seg.as_bytes()) {
         return Err(ActivationError::BadChecksum);
     }
     Ok((tier, decode_duration(&random_seg[..DURATION_CHARS])))
+}
+
+/// Constant-time byte-string equality.
+///
+/// Compares every byte, accumulates differences with `|=`, and checks
+/// the accumulator at the end — no early return on first mismatch.
+/// Returns false on length mismatch (lengths are public format data
+/// here, not secrets, so short-circuiting on length is acceptable).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// In-memory record of redeemed codes. Prevents double-spend of a code.
@@ -343,6 +364,16 @@ mod tests {
         let ac = generate(Tier::Monthly, 30, SECRET);
         let bad = ac.code.replacen("TRV1-MO-", "TRV1-YR-", 1);
         assert_eq!(validate(&bad, SECRET), Err(ActivationError::BadChecksum));
+    }
+
+    #[test]
+    fn constant_time_eq_behaves() {
+        assert!(constant_time_eq(b"ABCD", b"ABCD"));
+        assert!(!constant_time_eq(b"ABCD", b"ABCE"));
+        assert!(!constant_time_eq(b"AAAA", b"BBBB"));
+        assert!(!constant_time_eq(b"ABCD", b"ABC"));
+        assert!(!constant_time_eq(b"ABC", b"ABCD"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]

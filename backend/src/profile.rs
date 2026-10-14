@@ -1,6 +1,8 @@
-//! Encrypted profile vault stub.
+//! Plaintext in-memory profile vault.
 //!
-//! Real vault encrypts notes with the device key (age wiring later).
+//! NOT encrypted at rest — values are held in plain RAM. Real vault
+//! encrypts notes with the device key (age wiring later); encryption
+//! at rest is a future step, not a current property.
 //! Myspace-style live customization (music etc., ENHANCED) renders from
 //! this vault — all local.
 
@@ -24,7 +26,33 @@ impl ProfileVault {
     }
 
     /// Decentralized email replacing traditional email after registration.
+    ///
+    /// Canonical implementation lives in
+    /// [`crate::registration::decentralized_email`]; this delegates to it
+    /// so both paths produce identical addresses.
     pub fn decentralized_email(&self) -> String {
-        format!("{}@RV.com", self.handle)
+        crate::registration::decentralized_email(&self.handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_defaults_display_name_to_handle() {
+        let vault = ProfileVault::new("alice");
+        assert_eq!(vault.handle, "alice");
+        assert_eq!(vault.display_name, "alice");
+    }
+
+    #[test]
+    fn decentralized_email_matches_canonical() {
+        let vault = ProfileVault::new("alice");
+        assert_eq!(vault.decentralized_email(), "alice@RV.com");
+        assert_eq!(
+            vault.decentralized_email(),
+            crate::registration::decentralized_email("alice")
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Tier / entitlement / verification logic stub.
+//! Tier / entitlement / verification logic.
 //!
 //! Verified locally on-device. No billing network calls here —
 //! Solana is the separate track, only for TRV token/governance.
@@ -10,7 +10,7 @@ pub enum Tier {
     Free,
     /// Recurring monthly.
     Monthly,
-    /// Yearly (~$50/year depending on tier).
+    /// Yearly ($100/$150/$200 per year depending on paid tier).
     Yearly,
     /// Built the native stack via GH manually: 100% everything unlimited.
     Founding,
@@ -95,14 +95,41 @@ impl PaidTier {
     /// Yearly price in cents with the American-citizen discount applied
     /// ([`CITIZEN_DISCOUNT_YEARLY_BASIS_POINTS`], 17.67%).
     ///
-    /// Standalone rule: no assumption is made about stacking with the
-    /// [`DISCOUNT_YEARLY_PERCENT`] category discount — stacking
-    /// semantics are undecided and intentionally not combined here.
-    /// Computed with integer math; the result rounds down.
+    /// Standalone rule: this does NOT stack with the
+    /// [`DISCOUNT_YEARLY_PERCENT`] category discount. Use
+    /// [`PaidTier::best_yearly_price_cents`] for the real single-discount
+    /// rule; stacking semantics are undecided and intentionally not
+    /// combined here. Computed with integer math; the result rounds down.
     pub fn citizen_yearly_cents(self) -> u32 {
         let base = self.yearly_cents() as u64;
         let multiplier = 10_000u64 - u64::from(CITIZEN_DISCOUNT_YEARLY_BASIS_POINTS);
         ((base * multiplier) / 10_000) as u32
+    }
+
+    /// The viewer's real yearly price, given discount eligibility.
+    ///
+    /// REAL discount rule (user decisions 2026-10-13): a viewer may
+    /// qualify for the 20% discount-category rate ([`DiscountCategory`])
+    /// and/or the 17.67% American-citizen rate ([`CITIZEN_DISCOUNT_YEARLY_BASIS_POINTS`]).
+    ///
+    /// NON-STACKING: at most one discount is applied — the largest one
+    /// the viewer qualifies for. Today the 20% category rate always
+    /// beats the 17.67% citizen rate, so a qualifying category wins
+    /// outright. Whether discounts may ever combine is TBD per spec;
+    /// this function deliberately never applies more than one.
+    pub fn best_yearly_price_cents(
+        self,
+        category: Option<DiscountCategory>,
+        citizen: bool,
+    ) -> u32 {
+        let mut best = self.yearly_cents();
+        if let Some(cat) = category {
+            best = best.min(cat.yearly_price_cents(self));
+        }
+        if citizen {
+            best = best.min(self.citizen_yearly_cents());
+        }
+        best
     }
 }
 
@@ -328,5 +355,98 @@ mod tests {
         // Stacking semantics are TBD, so the two must not be equal
         // (guard against an accidental future merge).
         assert_ne!(category_price, citizen_price);
+    }
+
+    #[test]
+    fn best_yearly_price_applies_single_best_discount() {
+        // No eligibility: full price.
+        assert_eq!(PaidTier::Tier1.best_yearly_price_cents(None, false), 10000);
+        // Citizen only: 17.67% off -> 8233.
+        assert_eq!(PaidTier::Tier1.best_yearly_price_cents(None, true), 8233);
+        // Category only: 20% off -> 8000.
+        assert_eq!(
+            PaidTier::Tier1.best_yearly_price_cents(Some(DiscountCategory::Education), false),
+            8000
+        );
+        // Both: NO stacking — single best (category) wins, not both.
+        assert_eq!(
+            PaidTier::Tier1.best_yearly_price_cents(Some(DiscountCategory::ServeProtect), true),
+            8000
+        );
+        // Same on Tier 3: category ($160) beats citizen ($164.66).
+        assert_eq!(
+            PaidTier::Tier3.best_yearly_price_cents(Some(DiscountCategory::Authority), true),
+            16000
+        );
+        assert_eq!(PaidTier::Tier3.best_yearly_price_cents(None, true), 16466);
+    }
+
+    #[test]
+    fn discount_category_applies_to() {
+        for cat in [
+            DiscountCategory::Education,
+            DiscountCategory::Authority,
+            DiscountCategory::ServeProtect,
+        ] {
+            assert!(cat.applies_to(Tier::Monthly));
+            assert!(cat.applies_to(Tier::Yearly));
+            assert!(!cat.applies_to(Tier::Free));
+            assert!(!cat.applies_to(Tier::Founding));
+        }
+    }
+
+    #[test]
+    fn tier_unlimited_use_flags() {
+        assert!(!Tier::Free.unlimited_use());
+        assert!(Tier::Monthly.unlimited_use());
+        assert!(Tier::Yearly.unlimited_use());
+        assert!(Tier::Founding.unlimited_use());
+    }
+
+    #[test]
+    fn tier_max_proximity_miles() {
+        // Free: 1-mile limit for all comms. Everything else: unlimited.
+        assert_eq!(Tier::Free.max_proximity_miles(), Some(1));
+        assert_eq!(Tier::Monthly.max_proximity_miles(), None);
+        assert_eq!(Tier::Yearly.max_proximity_miles(), None);
+        assert_eq!(Tier::Founding.max_proximity_miles(), None);
+    }
+
+    #[test]
+    fn check_verification_gates_on_state_id() {
+        assert_eq!(
+            check_verification(true),
+            VerificationStatus::Unverified
+        );
+        assert_eq!(
+            check_verification(false),
+            VerificationStatus::Ineligible
+        );
+    }
+
+    #[test]
+    fn unlimited_entitlement_full_matrix() {
+        let free = Tier::Free;
+        let monthly = Tier::Monthly;
+        let yearly = Tier::Yearly;
+        let founding = Tier::Founding;
+        // Free: never unlimited, in any verification state.
+        for v in [
+            VerificationStatus::Unverified,
+            VerificationStatus::Pending,
+            VerificationStatus::Verified,
+            VerificationStatus::Ineligible,
+        ] {
+            assert!(!unlimited_entitlement(free, v));
+            // Founding: always unlimited, even unverified.
+            assert!(unlimited_entitlement(founding, v));
+        }
+        // Monthly/Yearly: unlimited only when Verified.
+        for tier in [monthly, yearly] {
+            assert!(!unlimited_entitlement(tier, VerificationStatus::Unverified));
+            assert!(!unlimited_entitlement(tier, VerificationStatus::Pending));
+            assert!(unlimited_entitlement(tier, VerificationStatus::Verified));
+            assert!(!unlimited_entitlement(tier, VerificationStatus::Ineligible));
+        }
     }
 }
