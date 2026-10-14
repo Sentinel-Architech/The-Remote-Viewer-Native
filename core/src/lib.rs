@@ -8,6 +8,7 @@ pub mod airgap;
 pub mod crypto;
 pub mod gateway;
 pub mod hw;
+pub mod hydra;
 pub mod identity;
 pub mod messaging;
 pub mod moe;
