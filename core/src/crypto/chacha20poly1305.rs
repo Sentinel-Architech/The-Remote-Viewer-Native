@@ -294,6 +294,14 @@ pub fn decrypt(
     let otk_full = chacha_block(key, 0, nonce);
     let mut otk = [0u8; 32];
     otk.copy_from_slice(&otk_full[..32]);
+    // Wipe the full block copy, like `encrypt` does; `otk` is wiped below.
+    let mut otk_full = otk_full;
+    for b in otk_full.iter_mut() {
+        // SAFETY: `b` is a valid, uniquely-borrowed byte.
+        unsafe {
+            core::ptr::write_volatile(b, 0u8);
+        }
+    }
     let mut mac_data = Vec::with_capacity(
         aad.len() + pad16_len(aad.len()) + ct.len() + pad16_len(ct.len()) + 16,
     );

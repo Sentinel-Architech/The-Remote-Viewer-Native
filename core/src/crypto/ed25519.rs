@@ -204,7 +204,7 @@ const MASK51_128: u128 = (1 << 51) - 1;
 
 /// Field element mod p = 2^255 - 19.
 #[derive(Clone, Copy, Debug)]
-struct Fe([u64; 5]);
+pub(crate) struct Fe([u64; 5]);
 
 /// Value equality mod p: reduces both sides to canonical bytes.
 /// Limb-wise `==` is NOT used because different limb vectors can
@@ -215,14 +215,14 @@ fn fe_equal(a: &Fe, b: &Fe) -> bool {
 }
 
 impl Fe {
-    fn zero() -> Self {
+    pub(crate) fn zero() -> Self {
         Fe([0, 0, 0, 0, 0])
     }
-    fn one() -> Self {
+    pub(crate) fn one() -> Self {
         Fe([1, 0, 0, 0, 0])
     }
     /// Small constant as a field element.
-    fn from_u64(v: u64) -> Self {
+    pub(crate) fn from_u64(v: u64) -> Self {
         debug_assert!(v < (1 << 51));
         Fe([v, 0, 0, 0, 0])
     }
@@ -255,7 +255,7 @@ fn fe_carry(t: [u128; 5]) -> Fe {
     Fe(out)
 }
 
-fn fe_add(a: &Fe, b: &Fe) -> Fe {
+pub(crate) fn fe_add(a: &Fe, b: &Fe) -> Fe {
     let mut t = [0u128; 5];
     for i in 0..5 {
         t[i] = a.0[i] as u128 + b.0[i] as u128;
@@ -274,7 +274,7 @@ const P_LIMBS: [u64; 5] = [
     (1 << 51) - 1,
 ];
 
-fn fe_sub(a: &Fe, b: &Fe) -> Fe {
+pub(crate) fn fe_sub(a: &Fe, b: &Fe) -> Fe {
     // Add 16*p first so no limb can underflow: 16 * P[i] >= 16 * 2^50
     // dominates any relaxed limb (< 2^54).
     let mut t = [0u128; 5];
@@ -306,17 +306,17 @@ fn fe_mul_raw(a: &Fe, b: &Fe) -> [u128; 5] {
     t
 }
 
-fn fe_mul(a: &Fe, b: &Fe) -> Fe {
+pub(crate) fn fe_mul(a: &Fe, b: &Fe) -> Fe {
     fe_carry(fe_mul_raw(a, b))
 }
 
-fn fe_sq(a: &Fe) -> Fe {
+pub(crate) fn fe_sq(a: &Fe) -> Fe {
     fe_mul(a, a)
 }
 
 /// Constant-time select: returns `a` when `choice == 0`, `b` when
 /// `choice == 1`. `choice` must be 0 or 1.
-fn fe_cmov(a: &Fe, b: &Fe, choice: u8) -> Fe {
+pub(crate) fn fe_cmov(a: &Fe, b: &Fe, choice: u8) -> Fe {
     debug_assert!(choice <= 1);
     // Widen BEFORE negating: (1u8).wrapping_neg() as u64 is 0xFF, not
     // all-ones. Negating as u64 gives the full 64-bit mask.
@@ -349,7 +349,7 @@ fn fe_pow(x: &Fe, e: &[u64; 4]) -> Fe {
 
 /// Multiplicative inverse via Fermat: x^(p-2), p-2 = 2^255 - 21.
 /// Returns 0 for x = 0 (documented; callers never invert zero).
-fn fe_inv(x: &Fe) -> Fe {
+pub(crate) fn fe_inv(x: &Fe) -> Fe {
     // p - 2 = (2^255 - 19) - 2 = 2^255 - 21 = (2^255 - 1) - 20.
     let mut e = [0xffffffffffffffffu64, 0xffffffffffffffff, 0xffffffffffffffff, 0x7fffffffffffffff];
     let mut borrow: u128 = 20;
@@ -412,7 +412,7 @@ fn fe_isnegative(a: &Fe) -> bool {
 /// compressed points must extract the sign bit first. (Ed25519 only
 /// ever feeds this the y-coordinate with the sign stripped, or
 /// values known to be < 2^255.)
-fn fe_frombytes(s: &[u8; 32]) -> Fe {
+pub(crate) fn fe_frombytes(s: &[u8; 32]) -> Fe {
     let load = |i: usize| {
         let mut b = [0u8; 8];
         b.copy_from_slice(&s[i * 8..(i + 1) * 8]);
@@ -433,7 +433,7 @@ fn fe_frombytes(s: &[u8; 32]) -> Fe {
 }
 
 /// Canonical 32-byte little-endian encoding.
-fn fe_tobytes(h: &Fe) -> [u8; 32] {
+pub(crate) fn fe_tobytes(h: &Fe) -> [u8; 32] {
     // Full carry first.
     let mut t = [
         h.0[0] as u128,
@@ -566,12 +566,14 @@ fn sc_muladd(a: &[u64; 4], b: &[u64; 4], c: &[u64; 4]) -> [u64; 4] {
         for j in 0..4 {
             let prod = a[i] as u128 * b[j] as u128;
             let mut carry = prod;
-            let mut k = i + j;
-            while carry != 0 && k < 8 {
+            // Fixed-iteration carry propagation: always run exactly
+            // 8 - (i + j) steps. Once `carry` is zero the adds are
+            // no-ops, so iteration count no longer depends on secret
+            // limb values (constant-time).
+            for k in (i + j)..8 {
                 let cur = t[k] as u128 + carry;
                 t[k] = cur as u64;
                 carry = cur >> 64;
-                k += 1;
             }
         }
     }
@@ -583,12 +585,11 @@ fn sc_muladd(a: &[u64; 4], b: &[u64; 4], c: &[u64; 4]) -> [u64; 4] {
         limbs[i] = cur as u64;
         cc = cur >> 64;
     }
-    let mut i = 4;
-    while cc != 0 && i < 8 {
+    // Fixed-iteration carry propagation (4 steps, no secret-dependent bound).
+    for i in 4..8 {
         let cur = limbs[i] as u128 + cc;
         limbs[i] = cur as u64;
         cc = cur >> 64;
-        i += 1;
     }
     sc_reduce_limbs(&limbs)
 }

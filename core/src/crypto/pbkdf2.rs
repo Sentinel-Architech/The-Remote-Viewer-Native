@@ -44,7 +44,20 @@ pub fn hmac_sha512(key: &[u8], msg: &[u8]) -> [u8; 64] {
     let mut outer = Vec::with_capacity(BLOCK + 64);
     outer.extend_from_slice(&opad);
     outer.extend_from_slice(&inner_hash);
-    sha512::digest(&outer)
+    let out = sha512::digest(&outer);
+    // Wipe key-equivalent material: the pads, plus the `outer` buffer
+    // which holds a verbatim copy of `opad`. (`k0` is wiped above.)
+    for b in ipad
+        .iter_mut()
+        .chain(opad.iter_mut())
+        .chain(outer.iter_mut())
+    {
+        // SAFETY: `b` is a valid, uniquely-borrowed byte.
+        unsafe {
+            core::ptr::write_volatile(b, 0u8);
+        }
+    }
+    out
 }
 
 /// Error from [`pbkdf2_sha512`] on invalid parameters.
@@ -82,13 +95,15 @@ pub fn pbkdf2_sha512(
     if iterations == 0 {
         return Err(KdfError::ZeroIterations);
     }
-    let max_len = (u32::MAX as usize) * 64;
-    if out_len == 0 || out_len > max_len {
+    // RFC 8018 §5.2: dkLen <= (2^32 - 1) * hLen. Compare in u64 so the
+    // bound itself never overflows on 32-bit targets.
+    let max_len = u64::from(u32::MAX) * 64;
+    if out_len == 0 || (out_len as u64) > max_len {
         return Err(KdfError::BadOutputLen);
     }
     // U_1 = PRF(password, salt || INT_32_BE(i)); U_j = PRF(password, U_{j-1}).
     let blocks = out_len.div_ceil(64);
-    let mut out = Vec::with_capacity(blocks * 64);
+    let mut out = Vec::with_capacity(out_len);
     let mut salt_block = Vec::with_capacity(salt.len() + 4);
     for i in 1..=blocks as u32 {
         salt_block.clear();
