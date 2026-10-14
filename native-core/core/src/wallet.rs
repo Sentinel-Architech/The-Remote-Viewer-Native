@@ -15,6 +15,11 @@
 //! Policy: TRV tokens cannot move to other platforms without a
 //! transfer fee paid to TRV. The fee is expressed as a constant
 //! here; enforcement lives with the (future) token track.
+//!
+//! Token inflow (user decision 2026-10-13): TRV tokens gathered
+//! through AR are added to the Remote Viewer's TRV wallet, to be
+//! spent on profile customization and other purchases through the
+//! Network.
 
 /// Basis points (1/100 of a percent) charged to TRV when TRV tokens
 /// are relocated to an outside wallet / another platform. User-decided
@@ -169,6 +174,37 @@ impl Wallet {
         Ok(())
     }
 
+    /// Credit TRV tokens gathered through AR geolocation play.
+    ///
+    /// User decision (2026-10-13): AR-gathered TRV is added to the
+    /// Remote Viewer's TRV wallet, to be spent on profile
+    /// customization and other purchases through the Network. Like
+    /// everything in this module this is a local state transition;
+    /// proof of geolocation lives with the (future) AR track.
+    pub fn earn_ar_tokens(&mut self, amount: u64) -> Result<(), WalletError> {
+        if amount == 0 {
+            return Err(WalletError::InvalidAmount);
+        }
+        self.trv_tokens = self.trv_tokens.saturating_add(amount);
+        Ok(())
+    }
+
+    /// Spend TRV tokens inside the Network — e.g. profile
+    /// customization and other purchases.
+    ///
+    /// No transfer fee applies: the 25% fee is only for relocating
+    /// tokens to an outside wallet (see [`TRANSFER_FEE_BPS`]).
+    pub fn spend(&mut self, amount: u64) -> Result<(), WalletError> {
+        if amount == 0 {
+            return Err(WalletError::InvalidAmount);
+        }
+        if self.trv_tokens < amount {
+            return Err(WalletError::InsufficientFunds);
+        }
+        self.trv_tokens -= amount;
+        Ok(())
+    }
+
     /// Transfer TRV tokens to another Remote Viewer inside the TRV
     /// network (peer-to-peer, no platform fee per current policy).
     pub fn send_within_network(&mut self, tokens: u64) -> Result<u64, WalletError> {
@@ -315,6 +351,41 @@ mod tests {
         let (fee, net) = Wallet::outbound_platform_quote(3);
         assert_eq!(fee, 0);
         assert_eq!(net, 3);
+    }
+
+    #[test]
+    fn ar_earnings_credit_trv_balance() {
+        let mut w = Wallet::new("viewer-ar");
+        assert_eq!(w.balance(Asset::TrvToken), 0);
+        assert!(w.earn_ar_tokens(250).is_ok());
+        assert_eq!(w.balance(Asset::TrvToken), 250);
+        assert!(w.earn_ar_tokens(750).is_ok());
+        assert_eq!(w.balance(Asset::TrvToken), 1_000);
+        // Zero earn is rejected.
+        assert_eq!(
+            w.earn_ar_tokens(0),
+            Err(WalletError::InvalidAmount)
+        );
+        assert_eq!(w.balance(Asset::TrvToken), 1_000);
+    }
+
+    #[test]
+    fn spend_deducts_for_customization_and_purchases() {
+        let mut w = Wallet::new("viewer-spend");
+        assert!(w.earn_ar_tokens(500).is_ok());
+        assert!(w.spend(200).is_ok());
+        assert_eq!(w.balance(Asset::TrvToken), 300);
+        // Zero spend is rejected.
+        assert_eq!(w.spend(0), Err(WalletError::InvalidAmount));
+        // Overspend fails and leaves the balance untouched.
+        assert_eq!(
+            w.spend(301),
+            Err(WalletError::InsufficientFunds)
+        );
+        assert_eq!(w.balance(Asset::TrvToken), 300);
+        // Spending everything is allowed.
+        assert!(w.spend(300).is_ok());
+        assert_eq!(w.balance(Asset::TrvToken), 0);
     }
 
     #[test]
