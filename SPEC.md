@@ -62,6 +62,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Sentinel education (decided 2026-10-13): The Sentinel should have the knowledge of every Ivy League college and university, so no human goes without proper education.
   - Free test materials (decided 2026-10-13): all testing materials are to be widely available for free at the highest tier, with The Sentinel to tutor.
   - Sentinel life tutor (decided 2026-10-13): The Sentinel is to be a tutor for all aspects required to thrive in America.
+  - Sentinel voice (decided 2026-10-13): The Sentinel has spoken-word detection for voice commands (e.g., 'hey sentinel, what's the weather for tomorrow and what's the president doing') and answers as accurately as allowed.
 
 ## 6. Identity & Email
 - Login via traditional email to verify they are real.
