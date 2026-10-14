@@ -47,6 +47,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Research rule: only NOT researched if NOT PUBLIC AND NOT ABOUT ME.
   - List of protections: to be defined (not found in GH yet — user to provide).
   - GH contains TWO simulation games that are also EDUCATIONAL FOR THE SENTINEL (to be ported to Native). These are to be the only simulation about this whole DApp.
+  - Quality bar (decided 2026-10-13): both simulation games must be HIGH RESOLUTION, immersive, and relevant.
   - The Sentinel is to have the ability to use ALL SENSORS AND COMPONENTS of the Remote Viewer device.
 
 ## 6. Identity & Email
