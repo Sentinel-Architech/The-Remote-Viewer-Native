@@ -57,7 +57,6 @@ pub const AINPUT_EVENT_TYPE_KEY: i32 = 1;
 pub const AINPUT_EVENT_TYPE_MOTION: i32 = 2;
 
 pub const AKEY_EVENT_ACTION_DOWN: i32 = 0;
-#[allow(dead_code)]
 pub const AKEY_EVENT_FLAG_CANCELED: i32 = 0x20;
 
 pub const AMETA_SHIFT_ON: i32 = 0x01;

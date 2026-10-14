@@ -179,7 +179,11 @@ impl Screen for SentinelScreen {
 
 impl PixelScreen for SentinelScreen {
     fn draw(&self, fb: &mut [u32], w: u32, h: u32) {
-        assert!(fb.len() >= (w * h) as usize, "framebuffer too small");
+        // Graceful no-op on an undersized framebuffer: a library draw path
+        // must never panic on bad caller input.
+        if fb.len() < (w as usize).saturating_mul(h as usize) {
+            return;
+        }
         let lay = Layout::new(w, h);
         // Background.
         render::fill_rect(fb, w, h, 0, 0, w, h, color::BLACK);
@@ -212,11 +216,7 @@ impl PixelScreen for SentinelScreen {
                 Author::Sentinel => lay.pad,
             };
             render::fill_rect(fb, w, h, bx, y, bw, GLYPH_H + 6, bubble_c);
-            let tc = match author {
-                Author::You => color::TEXT,
-                Author::Sentinel => color::TEXT,
-            };
-            render::draw_text(fb, w, h, bx + 8, y + 3, &line, tc);
+            render::draw_text(fb, w, h, bx + 8, y + 3, &line, color::TEXT);
             y += GLYPH_H + 10;
         }
 
@@ -307,6 +307,14 @@ mod tests {
         s.draw(&mut fb, 320, 200);
         let painted = fb.iter().filter(|&&p| p != 0).count();
         assert!(painted > 1000, "expected painted pixels, got {painted}");
+    }
+
+    #[test]
+    fn draw_with_tiny_framebuffer_does_not_panic() {
+        let s = SentinelScreen::new("viewer", 320, 200);
+        let mut fb = vec![0u32; 10]; // far too small: must no-op, not panic
+        s.draw(&mut fb, 320, 200);
+        assert!(fb.iter().all(|&p| p == 0));
     }
 
     #[test]

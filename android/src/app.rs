@@ -2,9 +2,16 @@
 //!
 //! * Entry: the manifest points `android.app.NativeActivity` at this
 //!   library; Android calls [`ANativeActivity_onCreate`].
-//! * Threading: one app thread owns a looper. Lifecycle callbacks run on
-//!   the main thread and only take the state lock for tiny updates, then
-//!   wake the looper — no lock is ever held across a blocking call.
+//! * Threading: one app thread owns a looper and all UI/render state.
+//!   Lifecycle callbacks run on the main thread and only take the state
+//!   lock for tiny, non-blocking updates, then wake the looper. The app
+//!   thread copies what it needs out from under the lock (a snapshot),
+//!   drops the guard, and only then does blocking work
+//!   (`ALooper_pollOnce`, `ANativeWindow_lock`) — so a main-thread
+//!   callback can never block on the app thread: no ANR, no deadlock.
+//!   The one exception is pulling raw events off the input queue, which
+//!   happens under the lock but only issues non-blocking
+//!   `AInputQueue_*` calls.
 //! * Display: pure software rendering. The [`SentinelScreen`] draws into a
 //!   CPU framebuffer; we blit it with `ANativeWindow_lock` /
 //!   `unlockAndPost`. No EGL, no GLES, no GPU required — this runs on any
@@ -14,13 +21,13 @@
 //!   composition is a documented v0.2 step.
 
 use crate::ffi::*;
-use crate::keys::{keycode_to_action, KeyAction, KEYCODE_BACK};
+use crate::keys::{keycode_to_action, KeyAction};
 use std::ffi::c_void;
 use std::mem;
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use trv_ui::platform::{PixelScreen, Screen, UiEvent};
 use trv_ui::screen::SentinelScreen;
 
@@ -33,10 +40,20 @@ const CMD_DESTROY: u8 = 1;
 /// Shared between the main thread (callbacks) and the app thread.
 struct Shared {
     looper: AtomicPtr<ALooper>,
-    app: Mutex<App>,
+    /// Handoff state. The mutex is only ever held for tiny, non-blocking
+    /// updates — never across `ALooper_pollOnce`, `AInputQueue_*`
+    /// (blocking forms), or `ANativeWindow_lock`.
+    state: Mutex<State>,
+    /// The leaked callbacks box, so a fatal early failure in the app
+    /// thread can uninstall and free it. Written once in
+    /// `ANativeActivity_onCreate` before the app thread spawns.
+    callbacks: *mut ANativeActivityCallbacks,
 }
 
-struct App {
+/// State shared with the main thread. Everything the app thread needs
+/// long-term for rendering (screen, framebuffer) lives in [`Ui`],
+/// owned solely by the app thread.
+struct State {
     activity: *mut ANativeActivity,
     looper: *mut ALooper,
     cmd_read: c_int,
@@ -44,6 +61,13 @@ struct App {
     window: *mut ANativeWindow,
     input_queue: *mut AInputQueue,
     input_attached: bool,
+    running: bool,
+    needs_draw: bool,
+}
+
+/// App-thread-owned UI/render state. Only the app thread touches this —
+/// never shared with the main thread, so no lock is needed for it.
+struct Ui {
     screen: SentinelScreen,
     /// Logical (UI) size and backing framebuffer.
     fb: Vec<u32>,
@@ -51,17 +75,30 @@ struct App {
     fb_h: u32,
     /// Physical px per UI px (DPI scaling for phones).
     scale: u32,
-    running: bool,
-    needs_draw: bool,
 }
 
-// Raw pointers are only touched under the mutex or on the app thread.
-unsafe impl Send for App {}
+// SAFETY: `Shared` is handed from the main thread to the app thread exactly
+// once (as a raw pointer through `std::thread::spawn`). Access protocol:
+//   * `looper` is an atomic — lock-free on both threads.
+//   * `state` sits behind a mutex that is only ever held for tiny,
+//     non-blocking updates; the app thread always drops the guard before
+//     any blocking call, so a main-thread callback can never block on it.
+//   * `callbacks` is written once in `ANativeActivity_onCreate` before the
+//     thread spawns and only read afterwards.
 unsafe impl Send for Shared {}
 
-impl App {
+// SAFETY: every raw pointer in `State` is only dereferenced while holding
+// the `Shared.state` mutex (short, non-blocking main-thread callbacks) or
+// by the app thread from a pointer value copied out from under the mutex —
+// never concurrently from both threads. The one pointer the app thread
+// keeps across a blocking call (the window) is held via its own
+// `ANativeWindow_acquire` reference, so the main thread may release its
+// copy (`on_window_destroyed`) mid-frame without a use-after-free.
+unsafe impl Send for State {}
+
+impl State {
     fn new(activity: *mut ANativeActivity) -> Self {
-        App {
+        State {
             activity,
             looper: ptr::null_mut(),
             cmd_read: -1,
@@ -69,54 +106,73 @@ impl App {
             window: ptr::null_mut(),
             input_queue: ptr::null_mut(),
             input_attached: false,
-            screen: SentinelScreen::new("viewer", 360, 640),
-            fb: Vec::new(),
-            fb_w: 0,
-            fb_h: 0,
-            scale: 2,
             running: true,
             needs_draw: true,
         }
     }
 }
 
+/// Lock the shared state, recovering from a poisoned mutex instead of
+/// panicking: on Android's main thread a panic would kill the process,
+/// and the guarded state is still valid and usable.
+unsafe fn lock_state<'a>(shared: *mut Shared) -> MutexGuard<'a, State> {
+    (*shared).state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Wake the app thread's looper (lock-free; safe from any callback).
 unsafe fn wake(shared: *mut Shared) {
+    if shared.is_null() {
+        return;
+    }
     let looper = (*shared).looper.load(Ordering::Acquire);
     if !looper.is_null() {
         ALooper_wake(looper);
     }
 }
 
+/// Undo `ANativeActivity_onCreate` after a fatal early failure in the app
+/// thread (pipe or looper creation failed): uninstall the callbacks so
+/// Android stops calling into dead state, then free both leaked boxes.
+/// The OS tears down the activity; there is no app thread left to clean up.
+unsafe fn uninstall(shared: *mut Shared) {
+    let callbacks = (*shared).callbacks;
+    let activity = lock_state(shared).activity;
+    if !activity.is_null() {
+        (*activity).callbacks = ptr::null_mut();
+        (*activity).instance = ptr::null_mut();
+    }
+    if !callbacks.is_null() {
+        drop(Box::from_raw(callbacks));
+    }
+    drop(Box::from_raw(shared));
+}
+
 // ------------------------------------------------------------ callbacks
 
-unsafe extern "C" fn on_start(_a: *mut ANativeActivity) {}
 unsafe extern "C" fn on_resume(a: *mut ANativeActivity) {
     let s = (*a).instance as *mut Shared;
-    (*s).app.lock().unwrap().needs_draw = true;
+    lock_state(s).needs_draw = true;
     wake(s);
 }
-unsafe extern "C" fn on_pause(_a: *mut ANativeActivity) {}
-unsafe extern "C" fn on_stop(_a: *mut ANativeActivity) {}
 
 unsafe extern "C" fn on_destroy(a: *mut ANativeActivity) {
     let s = (*a).instance as *mut Shared;
-    let fd = (*s).app.lock().unwrap().cmd_write;
+    let fd = lock_state(s).cmd_write;
     if fd >= 0 {
         let cmd = CMD_DESTROY;
         write(fd, &cmd as *const u8 as *const c_void, 1);
     }
     // The app thread observes CMD_DESTROY and exits; the OS reclaims the
-    // leaked Shared/App afterwards (process-scoped singletons).
+    // leaked Shared/State afterwards (process-scoped singletons).
 }
 
 unsafe extern "C" fn on_window_created(a: *mut ANativeActivity, window: *mut ANativeWindow) {
     let s = (*a).instance as *mut Shared;
     ANativeWindow_acquire(window);
     {
-        let mut app = (*s).app.lock().unwrap();
-        app.window = window;
-        app.needs_draw = true;
+        let mut st = lock_state(s);
+        st.window = window;
+        st.needs_draw = true;
     }
     wake(s);
 }
@@ -124,10 +180,10 @@ unsafe extern "C" fn on_window_created(a: *mut ANativeActivity, window: *mut ANa
 unsafe extern "C" fn on_window_destroyed(a: *mut ANativeActivity, _w: *mut ANativeWindow) {
     let s = (*a).instance as *mut Shared;
     {
-        let mut app = (*s).app.lock().unwrap();
-        if !app.window.is_null() {
-            ANativeWindow_release(app.window);
-            app.window = ptr::null_mut();
+        let mut st = lock_state(s);
+        if !st.window.is_null() {
+            ANativeWindow_release(st.window);
+            st.window = ptr::null_mut();
         }
     }
     wake(s);
@@ -135,19 +191,19 @@ unsafe extern "C" fn on_window_destroyed(a: *mut ANativeActivity, _w: *mut ANati
 
 unsafe extern "C" fn on_redraw_needed(a: *mut ANativeActivity, _w: *mut ANativeWindow) {
     let s = (*a).instance as *mut Shared;
-    (*s).app.lock().unwrap().needs_draw = true;
+    lock_state(s).needs_draw = true;
     wake(s);
 }
 
 unsafe extern "C" fn on_input_created(a: *mut ANativeActivity, queue: *mut AInputQueue) {
     let s = (*a).instance as *mut Shared;
     {
-        let mut app = (*s).app.lock().unwrap();
-        app.input_queue = queue;
+        let mut st = lock_state(s);
+        st.input_queue = queue;
         let looper = (*s).looper.load(Ordering::Acquire);
-        if !looper.is_null() && !app.input_attached {
+        if !looper.is_null() && !st.input_attached {
             AInputQueue_attachLooper(queue, looper, LOOPER_ID_INPUT, None, ptr::null_mut());
-            app.input_attached = true;
+            st.input_attached = true;
         }
     }
     wake(s);
@@ -156,11 +212,11 @@ unsafe extern "C" fn on_input_created(a: *mut ANativeActivity, queue: *mut AInpu
 unsafe extern "C" fn on_input_destroyed(a: *mut ANativeActivity, _q: *mut AInputQueue) {
     let s = (*a).instance as *mut Shared;
     {
-        let mut app = (*s).app.lock().unwrap();
-        if !app.input_queue.is_null() {
-            AInputQueue_detachLooper(app.input_queue);
-            app.input_queue = ptr::null_mut();
-            app.input_attached = false;
+        let mut st = lock_state(s);
+        if !st.input_queue.is_null() {
+            AInputQueue_detachLooper(st.input_queue);
+            st.input_queue = ptr::null_mut();
+            st.input_attached = false;
         }
     }
     wake(s);
@@ -168,16 +224,16 @@ unsafe extern "C" fn on_input_destroyed(a: *mut ANativeActivity, _q: *mut AInput
 
 // ---------------------------------------------------------------- input
 
-/// Translate one Android key event into [`UiEvent`]s.
-unsafe fn key_to_events(event: *const AInputEvent, out: &mut Vec<UiEvent>) {
-    if AKeyEvent_getAction(event) != AKEY_EVENT_ACTION_DOWN {
+/// Translate one Android key event into [`UiEvent`]s. Pure function of the
+/// event fields — no queue or screen access.
+fn key_to_events(action: i32, flags: i32, keycode: i32, meta: i32, out: &mut Vec<UiEvent>) {
+    if action != AKEY_EVENT_ACTION_DOWN {
         return;
     }
-    if AKeyEvent_getFlags(event) & AKEY_EVENT_FLAG_CANCELED != 0 {
+    if flags & AKEY_EVENT_FLAG_CANCELED != 0 {
         return;
     }
-    let keycode = AKeyEvent_getKeyCode(event);
-    let shift = AKeyEvent_getMetaState(event) & AMETA_SHIFT_ON != 0;
+    let shift = meta & AMETA_SHIFT_ON != 0;
     match keycode_to_action(keycode, shift) {
         Some(KeyAction::Char(c)) => out.push(UiEvent::Char(c)),
         Some(KeyAction::Backspace) => out.push(UiEvent::Backspace),
@@ -187,13 +243,14 @@ unsafe fn key_to_events(event: *const AInputEvent, out: &mut Vec<UiEvent>) {
     }
 }
 
-/// Drain the input queue into [`UiEvent`]s. Taps inside the input box also
-/// summon the soft keyboard.
-unsafe fn drain_input(app: &mut App) {
-    let queue = app.input_queue;
-    if queue.is_null() {
-        return;
-    }
+/// Pull pending events off the input queue and translate them to
+/// [`UiEvent`]s. Taps are reported in logical (UI) pixels.
+///
+/// Must be called with the state lock held: the queue pointer is only
+/// valid until the main thread destroys it, and every `AInputQueue_*`
+/// call below is non-blocking, so the lock is never held across a
+/// blocking call.
+unsafe fn pull_input(queue: *mut AInputQueue, scale: u32) -> Vec<UiEvent> {
     let mut events = Vec::new();
     while AInputQueue_hasEvents(queue) != 0 {
         let mut ev: *mut AInputEvent = ptr::null_mut();
@@ -204,7 +261,13 @@ unsafe fn drain_input(app: &mut App) {
         match AInputEvent_getType(ev) {
             t if t == AINPUT_EVENT_TYPE_KEY => {
                 let before = events.len();
-                key_to_events(ev, &mut events);
+                key_to_events(
+                    AKeyEvent_getAction(ev),
+                    AKeyEvent_getFlags(ev),
+                    AKeyEvent_getKeyCode(ev),
+                    AKeyEvent_getMetaState(ev),
+                    &mut events,
+                );
                 if events.len() == before {
                     handled = 0;
                 }
@@ -213,14 +276,8 @@ unsafe fn drain_input(app: &mut App) {
                 if AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK
                     == AMOTION_EVENT_ACTION_DOWN
                 {
-                    let x = (AMotionEvent_getX(ev, 0).max(0.0) as u32) / app.scale;
-                    let y = (AMotionEvent_getY(ev, 0).max(0.0) as u32) / app.scale;
-                    if app.screen.input_hit(x, y) {
-                        ANativeActivity_showSoftInput(
-                            app.activity,
-                            ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT,
-                        );
-                    }
+                    let x = (AMotionEvent_getX(ev, 0).max(0.0) as u32) / scale;
+                    let y = (AMotionEvent_getY(ev, 0).max(0.0) as u32) / scale;
                     events.push(UiEvent::Tap(x, y));
                 }
             }
@@ -228,49 +285,71 @@ unsafe fn drain_input(app: &mut App) {
         }
         AInputQueue_finishEvent(queue, ev, handled);
     }
+    events
+}
+
+/// Drain the input queue into the screen. The queue itself is only touched
+/// under the state lock (see [`pull_input`]); translating/applying the
+/// events — including the soft-keyboard calls — happens with no lock held.
+/// Taps inside the input box summon the soft keyboard.
+unsafe fn drain_input(shared: *mut Shared, ui: &mut Ui, activity: *mut ANativeActivity) {
+    let events = {
+        let st = lock_state(shared);
+        let queue = st.input_queue;
+        if queue.is_null() {
+            return;
+        }
+        pull_input(queue, ui.scale)
+    };
     let mut needs_kb_hide = false;
     for e in events {
+        if let UiEvent::Tap(x, y) = e {
+            if ui.screen.input_hit(x, y) {
+                ANativeActivity_showSoftInput(
+                    activity,
+                    ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT,
+                );
+            }
+        }
         if e == UiEvent::Enter {
             needs_kb_hide = true;
         }
-        app.screen.on_event(e);
+        ui.screen.on_event(e);
     }
     if needs_kb_hide {
-        ANativeActivity_hideSoftInput(app.activity, ANATIVEACTIVITY_HIDE_SOFT_INPUT_IMPLICIT_ONLY);
+        ANativeActivity_hideSoftInput(activity, ANATIVEACTIVITY_HIDE_SOFT_INPUT_IMPLICIT_ONLY);
     }
-    let _ = KEYCODE_BACK; // (documented) back key maps to Escape via keys.rs
 }
 
 // --------------------------------------------------------------- display
 
 /// Render the screen and blit it to the native window.
+///
+/// `window` is a reference owned by the caller (acquired before the
+/// call); the state lock is NOT held here — `ANativeWindow_lock` blocks.
 /// Pixel swizzle: our framebuffer is 0xRRGGBBAA; `WINDOW_FORMAT_RGBA_8888`
 /// wants bytes [R,G,B,A] in memory, i.e. the byte-swapped u32 on LE.
-unsafe fn render_and_present(app: &mut App) {
-    let win = app.window;
-    if win.is_null() {
-        return;
-    }
-    let pw = ANativeWindow_width(win).max(1) as u32;
-    let ph = ANativeWindow_height(win).max(1) as u32;
-    ANativeWindow_setBuffersGeometry(win, pw as i32, ph as i32, WINDOW_FORMAT_RGBA_8888);
+unsafe fn render_and_present(window: *mut ANativeWindow, ui: &mut Ui) {
+    let pw = ANativeWindow_width(window).max(1) as u32;
+    let ph = ANativeWindow_height(window).max(1) as u32;
+    ANativeWindow_setBuffersGeometry(window, pw as i32, ph as i32, WINDOW_FORMAT_RGBA_8888);
 
     // Integer UI scaling so the 8px font stays readable on phone DPIs.
-    let scale = (pw / 540).clamp(1, 4).max(1);
+    let scale = (pw / 540).clamp(1, 4);
     let w = pw / scale;
     let h = ph / scale;
-    if app.fb_w != w || app.fb_h != h {
-        app.scale = scale;
-        app.fb_w = w;
-        app.fb_h = h;
-        app.fb = vec![0; (w * h) as usize];
-        app.screen.on_event(UiEvent::Resize(w, h));
+    if ui.fb_w != w || ui.fb_h != h {
+        ui.scale = scale;
+        ui.fb_w = w;
+        ui.fb_h = h;
+        ui.fb = vec![0; (w * h) as usize];
+        ui.screen.on_event(UiEvent::Resize(w, h));
     }
 
-    app.screen.draw(&mut app.fb, w, h);
+    ui.screen.draw(&mut ui.fb, w, h);
 
     let mut buf: ANativeWindowBuffer = mem::zeroed();
-    if ANativeWindow_lock(win, &mut buf, ptr::null_mut()) != 0 {
+    if ANativeWindow_lock(window, &mut buf, ptr::null_mut()) != 0 {
         return;
     }
     let dst = buf.bits as *mut u32;
@@ -283,22 +362,35 @@ unsafe fn render_and_present(app: &mut App) {
             let sy = (y as u32 / scale).min(h - 1) as usize;
             for x in 0..bw {
                 let sx = (x as u32 / scale).min(w - 1) as usize;
-                *dst.add(y * stride + x) = app.fb[sy * w as usize + sx].swap_bytes();
+                *dst.add(y * stride + x) = ui.fb[sy * w as usize + sx].swap_bytes();
             }
         }
     }
-    ANativeWindow_unlockAndPost(win);
+    ANativeWindow_unlockAndPost(window);
 }
 
 // ------------------------------------------------------------ main loop
 
+/// Pointer-sized snapshot copied out from under the state lock.
+struct Snap {
+    running: bool,
+    window: *mut ANativeWindow,
+    cmd_read: c_int,
+}
+
 unsafe fn android_main(shared: *mut Shared) {
     let mut fds = [0 as c_int; 2];
     if pipe(fds.as_mut_ptr()) != 0 {
+        // No wake pipe, no loop: uninstall everything and bail instead
+        // of leaking the callbacks and Shared.
+        uninstall(shared);
         return;
     }
     let looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
     if looper.is_null() {
+        close(fds[0]);
+        close(fds[1]);
+        uninstall(shared);
         return;
     }
     ALooper_acquire(looper);
@@ -311,92 +403,137 @@ unsafe fn android_main(shared: *mut Shared) {
         ptr::null_mut(),
     );
     (*shared).looper.store(looper, Ordering::Release);
+
+    // App-thread-owned UI state: never shared with the main thread, so no
+    // lock is needed to touch it.
+    let mut ui = Ui {
+        screen: SentinelScreen::new("viewer", 360, 640),
+        fb: Vec::new(),
+        fb_w: 0,
+        fb_h: 0,
+        scale: 2,
+    };
+
+    // `activity` never changes after onCreate; snapshot it once.
+    let activity = lock_state(shared).activity;
+
     {
-        let mut app = (*shared).app.lock().unwrap();
-        app.looper = looper;
-        app.cmd_read = fds[0];
-        app.cmd_write = fds[1];
+        let mut st = lock_state(shared);
+        st.looper = looper;
+        st.cmd_read = fds[0];
+        st.cmd_write = fds[1];
         // An input queue may have arrived before the looper existed.
-        if !app.input_queue.is_null() && !app.input_attached {
+        if !st.input_queue.is_null() && !st.input_attached {
             AInputQueue_attachLooper(
-                app.input_queue,
+                st.input_queue,
                 looper,
                 LOOPER_ID_INPUT,
                 None,
                 ptr::null_mut(),
             );
-            app.input_attached = true;
+            st.input_attached = true;
         }
-        app.needs_draw = true;
+        st.needs_draw = true;
     }
 
     loop {
-        {
-            let app = (*shared).app.lock().unwrap();
-            if !app.running {
-                break;
+        // 1. Snapshot under the lock; the guard is dropped immediately.
+        //    Take our own window reference so the main thread can release
+        //    its copy (on_window_destroyed) mid-frame without a
+        //    use-after-free.
+        let snap = {
+            let st = lock_state(shared);
+            let window = st.window;
+            if !window.is_null() {
+                ANativeWindow_acquire(window);
             }
+            Snap {
+                running: st.running,
+                window,
+                cmd_read: st.cmd_read,
+            }
+        };
+        if !snap.running {
+            if !snap.window.is_null() {
+                ANativeWindow_release(snap.window);
+            }
+            break;
         }
-        // Block indefinitely: callbacks wake us via ALooper_wake. The lock
-        // is never held across this call, so callbacks can't deadlock.
+
+        // 2. Block indefinitely with NO lock held: callbacks wake us via
+        //    ALooper_wake and can never block on us (no ANR, no deadlock).
         let mut out_fd = 0 as c_int;
         let mut out_events = 0 as c_int;
         let mut out_data: *mut c_void = ptr::null_mut();
         let ident = ALooper_pollOnce(-1, &mut out_fd, &mut out_events, &mut out_data);
 
-        let mut app = (*shared).app.lock().unwrap();
-        if !app.running {
-            break;
-        }
+        // 3. Handle the event with no lock held.
+        let mut mark_draw = false;
+        let mut quit = false;
         match ident {
             LOOPER_ID_INPUT => {
-                drain_input(&mut app);
-                app.needs_draw = true;
+                drain_input(shared, &mut ui, activity);
+                mark_draw = true;
             }
             LOOPER_ID_CMD => {
                 let mut cmd = 0u8;
-                let n = read(
-                    app.cmd_read,
-                    &mut cmd as *mut u8 as *mut c_void,
-                    1,
-                );
+                let n = read(snap.cmd_read, &mut cmd as *mut u8 as *mut c_void, 1);
                 if n == 1 && cmd == CMD_DESTROY {
-                    app.running = false;
+                    quit = true;
                 }
-                app.needs_draw = true;
+                mark_draw = true;
             }
             id if id == ALOOPER_POLL_WAKE => {
-                app.needs_draw = true;
+                mark_draw = true;
             }
             id if id == ALOOPER_POLL_TIMEOUT => {}
             id if id == ALOOPER_POLL_CALLBACK => {}
             id if id == ALOOPER_POLL_ERROR => {}
             _ => {}
         }
-        if !app.window.is_null() && (app.needs_draw || app.fb.is_empty()) {
-            app.needs_draw = false;
-            render_and_present(&mut app);
+
+        // 4. Re-lock only to publish results.
+        let draw = {
+            let mut st = lock_state(shared);
+            if quit {
+                st.running = false;
+            }
+            if mark_draw {
+                st.needs_draw = true;
+            }
+            let draw = st.needs_draw || ui.fb.is_empty();
+            st.needs_draw = false;
+            draw
+        };
+
+        // 5. Render with no lock held (`ANativeWindow_lock` blocks), then
+        //    release our window reference.
+        if draw && !snap.window.is_null() {
+            render_and_present(snap.window, &mut ui);
+        }
+        if !snap.window.is_null() {
+            ANativeWindow_release(snap.window);
         }
     }
 
-    // Teardown.
+    // Teardown: short lock, no blocking calls.
     {
-        let mut app = (*shared).app.lock().unwrap();
-        if !app.input_queue.is_null() {
-            AInputQueue_detachLooper(app.input_queue);
-            app.input_queue = ptr::null_mut();
+        let mut st = lock_state(shared);
+        if !st.input_queue.is_null() {
+            AInputQueue_detachLooper(st.input_queue);
+            st.input_queue = ptr::null_mut();
         }
-        if !app.window.is_null() {
-            ANativeWindow_release(app.window);
-            app.window = ptr::null_mut();
+        if !st.window.is_null() {
+            ANativeWindow_release(st.window);
+            st.window = ptr::null_mut();
         }
-        if app.cmd_read >= 0 {
-            close(app.cmd_read);
+        if st.cmd_read >= 0 {
+            close(st.cmd_read);
         }
-        if app.cmd_write >= 0 {
-            close(app.cmd_write);
+        if st.cmd_write >= 0 {
+            close(st.cmd_write);
         }
-        app.looper = ptr::null_mut();
+        st.looper = ptr::null_mut();
     }
     (*shared).looper.store(ptr::null_mut(), Ordering::Release);
     ALooper_release(looper);
@@ -411,16 +548,17 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(
 ) {
     let shared = Box::into_raw(Box::new(Shared {
         looper: AtomicPtr::new(ptr::null_mut()),
-        app: Mutex::new(App::new(activity)),
+        state: Mutex::new(State::new(activity)),
+        callbacks: ptr::null_mut(),
     }));
     (*activity).instance = shared as *mut c_void;
 
     let callbacks = Box::new(ANativeActivityCallbacks {
-        on_start: Some(on_start),
+        on_start: None,
         on_resume: Some(on_resume),
         on_save_instance_state: None,
-        on_pause: Some(on_pause),
-        on_stop: Some(on_stop),
+        on_pause: None,
+        on_stop: None,
         on_destroy: Some(on_destroy),
         on_window_focus_changed: None,
         on_native_window_created: Some(on_window_created),
@@ -434,12 +572,15 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(
         on_low_memory: None,
     });
     (*activity).callbacks = Box::into_raw(callbacks);
-    // (Leaked on purpose: they live as long as the activity.)
+    // Remember the box so a fatal early failure in the app thread can
+    // uninstall and free it. Written before the thread spawns.
+    (*shared).callbacks = (*activity).callbacks;
+    // (Both boxes are leaked on purpose: they live as long as the
+    // activity, and the app thread frees them on clean exit paths.)
 
-    // `shared` crosses threads as a `usize`: raw pointers are not `Send`.
-    // Safety rests on the access protocol, not the type system — the app
-    // thread owns `Shared` (mutex-guarded state + atomic looper), and the
-    // main thread only touches it inside the short, non-blocking callbacks.
+    // `shared` crosses threads as a raw pointer (see the SAFETY notes on
+    // the Send impls): the app thread owns `Shared`, and the main thread
+    // only touches it inside the short, non-blocking callbacks above.
     let raw = shared as usize;
     std::thread::spawn(move || android_main(raw as *mut Shared));
 }

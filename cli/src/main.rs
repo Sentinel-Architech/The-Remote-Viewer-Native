@@ -10,13 +10,15 @@ use trv_core::moe::route;
 
 const BANNER: &str = "The Sentinel (on-device, native). Type a request, or 'quit' to exit.";
 
-fn handle(input: &str) {
+/// Route one input line through the on-device MoE router.
+/// Returns the line to print, or `None` for blank input (no output).
+fn handle(input: &str) -> Option<String> {
     let input = input.trim();
     if input.is_empty() {
-        return;
+        return None;
     }
     let skill = route(input);
-    println!("-> expert: {}", skill.name());
+    Some(format!("-> expert: {}", skill.name()))
 }
 
 fn main() {
@@ -24,7 +26,9 @@ fn main() {
 
     if !args.is_empty() {
         // One-shot mode: route everything passed on the command line.
-        handle(&args.join(" "));
+        if let Some(line) = handle(&args.join(" ")) {
+            println!("{line}");
+        }
         return;
     }
 
@@ -38,10 +42,45 @@ fn main() {
                 if text.eq_ignore_ascii_case("quit") || text.eq_ignore_ascii_case("exit") {
                     break;
                 }
-                handle(&text);
+                if let Some(line) = handle(&text) {
+                    println!("{line}");
+                }
             }
             Err(_) => break,
         }
         let _ = io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_input_produces_no_output() {
+        assert_eq!(handle(""), None);
+        assert_eq!(handle("   "), None);
+        assert_eq!(handle("\t\n "), None);
+    }
+
+    #[test]
+    fn input_is_trimmed_before_routing() {
+        assert_eq!(handle("  quantum  "), handle("quantum"));
+    }
+
+    #[test]
+    fn output_names_the_routed_expert() {
+        assert_eq!(handle("quantum"), Some("-> expert: quantum".to_string()));
+        assert_eq!(
+            handle("first aid for a burn"),
+            Some("-> expert: first-aid".to_string())
+        );
+    }
+
+    #[test]
+    fn output_format_has_arrow_prefix() {
+        let line = handle("hello world").expect("non-blank input must route");
+        assert!(line.starts_with("-> expert: "), "unexpected format: {line}");
+        assert!(!line.contains('\n'), "output must be a single line");
     }
 }

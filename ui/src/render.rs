@@ -27,15 +27,20 @@ pub mod color {
 }
 
 /// Fill a rectangle, clipped to the framebuffer.
+/// All index arithmetic is saturating, and writes are bounds-checked, so
+/// this never panics — even on a framebuffer smaller than `w * h`.
 pub fn fill_rect(fb: &mut [u32], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, c: u32) {
     let x1 = x.min(w);
     let y1 = y.min(h);
-    let x2 = (x + rw).min(w);
-    let y2 = (y + rh).min(h);
+    let x2 = x.saturating_add(rw).min(w);
+    let y2 = y.saturating_add(rh).min(h);
     for py in y1..y2 {
-        let base = (py * w) as usize;
+        let base = (py as usize).saturating_mul(w as usize);
         for px in x1..x2 {
-            fb[base + px as usize] = c;
+            let idx = base.saturating_add(px as usize);
+            if let Some(slot) = fb.get_mut(idx) {
+                *slot = c;
+            }
         }
     }
 }

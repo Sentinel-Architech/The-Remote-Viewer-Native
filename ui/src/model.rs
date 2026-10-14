@@ -5,6 +5,7 @@
 //! here touches the network, by construction: the only dependency is
 //! `trv-core`, which itself performs no I/O.
 
+use std::collections::VecDeque;
 use trv_core::sentinel::Sentinel;
 
 /// Who said a line.
@@ -36,7 +37,7 @@ impl Message {
 #[derive(Debug)]
 pub struct ChatSession {
     sentinel: Sentinel,
-    messages: Vec<Message>,
+    messages: VecDeque<Message>,
     input: String,
     /// Maximum messages retained (oldest are dropped).
     capacity: usize,
@@ -49,7 +50,7 @@ impl ChatSession {
         let sentinel = Sentinel::new(owner_handle);
         let mut s = ChatSession {
             sentinel,
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             input: String::new(),
             capacity: 200,
         };
@@ -57,7 +58,7 @@ impl ChatSession {
         s
     }
 
-    pub fn messages(&self) -> &[Message] {
+    pub fn messages(&self) -> &VecDeque<Message> {
         &self.messages
     }
 
@@ -95,9 +96,9 @@ impl ChatSession {
 
     fn push(&mut self, author: Author, text: impl Into<String>) {
         if self.messages.len() >= self.capacity {
-            self.messages.remove(0);
+            self.messages.pop_front();
         }
-        self.messages.push(Message::new(author, text));
+        self.messages.push_back(Message::new(author, text));
     }
 }
 

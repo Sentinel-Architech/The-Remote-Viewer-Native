@@ -7,13 +7,13 @@
 //! This is the desktop proof that the UI core has zero platform APIs:
 //! the same `SentinelScreen` also renders to raw pixels for Android.
 
-use trv_ui::backends::terminal::Terminal;
+use trv_ui::backends::terminal::{terminal_size, Terminal};
 use trv_ui::platform::{EventPump, Screen, TextScreen, TextTarget, UiEvent};
 use trv_ui::screen::SentinelScreen;
 
 fn main() {
     let mut term = Terminal::new();
-    let (cols, rows) = term.size();
+    let (cols, rows) = terminal_size().unwrap_or((80, 24));
     let mut screen = SentinelScreen::new("viewer", 640, 400);
 
     let mut buf = String::new();
