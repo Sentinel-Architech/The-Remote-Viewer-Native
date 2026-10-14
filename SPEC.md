@@ -76,6 +76,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Creators get watermarks that can't be replaced. Remote Viewers who want to earn a living creating exclusively for TRV get 80% of what they sell.
 - Creator paywalls (confirmed 2026-10-13): creators can paywall their own content. Revenue split: 80% to creator, 20% to TRV.
 - Adult content (decided 2026-10-13): if two adults are consenting and it's XXX, it goes behind a paywall for a fee of the creator's choice, with 15% going to TRV Network for NFT costs. (Exception to the standard 80/20 creator split — adult XXX uses 85/15.)
+- Creator video (decided 2026-10-13): creators can post videos up to 3 hours long, at 4K resolution, if they choose.
 
 ## 8. Subscriptions, Tiers, Founding Members
 - Tiers (decided 2026-10-13): Tier 1 — $10/month or $100/year; Tier 2 — $25/month or $150/year; Tier 3 — $45/month or $200/year.
