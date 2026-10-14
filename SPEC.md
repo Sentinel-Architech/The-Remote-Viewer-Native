@@ -56,6 +56,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Transitions (decided 2026-10-13): vortex animation for transitions into games, out of games, and between in-game events.
   - The Sentinel is to have the ability to use ALL SENSORS AND COMPONENTS of the Remote Viewer device.
   - Sentinel compute scaling (decided 2026-10-13): The Sentinel (Enhanced Intelligence) goes above and beyond if the Remote Viewer has the compute power — adaptive to device capability.
+  - Sentinel education (decided 2026-10-13): The Sentinel should have the knowledge of every Ivy League college and university, so no human goes without proper education.
 
 ## 6. Identity & Email
 - Login via traditional email to verify they are real.
