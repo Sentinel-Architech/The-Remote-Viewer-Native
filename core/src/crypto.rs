@@ -131,13 +131,12 @@ impl std::fmt::Debug for Keypair {
 
 /// 64-bit FNV-1a hash of `data`.
 ///
-/// A small, deterministic, dependency-free integrity hash shared by
-/// core modules (QR scramble tags, air-gap checks). This is an
+/// A small, deterministic, dependency-free integrity hash available
+/// to core modules for lightweight integrity checks. This is an
 /// *integrity* primitive — not a MAC, not a password hash, not
 /// collision-resistant against motivated adversaries. Real
-/// authentication (age/Ed25519) lands behind the stable crypto API
-/// later; this function keeps its signature so call sites migrate
-/// cleanly.
+/// authentication (Ed25519) lands behind the stable crypto API;
+/// this function keeps its signature so call sites migrate cleanly.
 pub fn fnv1a64(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in data {
