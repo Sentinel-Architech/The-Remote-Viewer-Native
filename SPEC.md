@@ -27,6 +27,7 @@
 - Security target (decided 2026-10-13): secure enough that the President could tell his Secret Service to use it. (Aspirational target, not a current claim.)
 - Spy detection (decided 2026-10-13): The Remote Viewer natively detects anything spy-related.
 - Post-quantum crypto targets (verified 2026-10-14): NIST FIPS 203 (ML-KEM-768/1024) for key encapsulation designed to resist harvest-now-decrypt-later attacks; FIPS 204 (ML-DSA) for signatures with FIPS 205 (SLH-DSA, hash-based) as the conservative fallback; hybrid classical+PQC approach per NIST migration guidance. NFC out-of-band public-key exchange (no cloud relay) and mlock-style protection of key material in memory are adopted design goals. All are design targets, not current implementation — no production transport encryption exists yet.
+- Patent/IP posture (verified 2026-10-14): USPTO Director John Squires confirmed 2025-09-18, runs an "America First IP" agenda. Alice Corp v. CLS Bank (2014) §101 two-step test applies to software patentability — technical improvement of computer functioning qualifies. Only natural persons can be inventors. Caution: the HYDRA name is crowded — Catapult Hydra (Pango VPN protocol) and Cardano Hydra (blockchain L2) are real prior uses; naming collision risk flagged before any branding/IP filing.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
 ## 3. Target Devices
@@ -65,6 +66,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Free test materials (decided 2026-10-13): all testing materials are to be widely available for free at the highest tier, with The Sentinel to tutor.
   - Sentinel life tutor (decided 2026-10-13): The Sentinel is to be a tutor for all aspects required to thrive in America.
   - Sentinel voice (decided 2026-10-13): The Sentinel has spoken-word detection for voice commands (e.g., 'hey sentinel, what's the weather for tomorrow and what's the president doing') and answers as accurately as allowed.
+  - Sentinel tutoring design principles (verified 2026-10-14): Universal Design for Learning (CAST) — multiple means of engagement, representation, and action/expression for typical, atypical, neurodivergent, and gifted learners. Lifespan coverage from early childhood through adult. Accessibility baselines: IDEA (FAPE via IEPs), Section 504, ADA Titles II/III, consistent with the existing federal/ADA-compliance decisions. WEP/WAP gifted plans supported.
 
 ## 6. Identity & Email
 - Login via traditional email to verify they are real.
