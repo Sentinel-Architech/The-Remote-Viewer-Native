@@ -9,6 +9,12 @@
 //! - `sentinel mint` — sign (mint) an activation code.
 //! - `sentinel verify` — verify an activation code against a public key.
 //!
+//! And the vault tooling:
+//! - `sentinel vault-migrate --from <plain> --to <enc>` — one-time
+//!   upgrade of a legacy plaintext vault file to the encrypted format.
+//!   The passphrase is read from stdin (never from argv, so it does not
+//!   land in shell history).
+//!
 //! 100% on-device. std only. No network I/O. No external dependencies.
 
 use std::io::{self, BufRead, Write};
@@ -32,43 +38,31 @@ fn handle(input: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Gather 32 bytes of entropy for key generation.
-/// Tries `/dev/urandom` first (Unix); falls back to a time/PID-based
-/// mixer with a loud warning. The fallback is NOT suitable for
-/// production issuer keys.
-fn gather_entropy() -> ([u8; 32], bool) {
+///
+/// Tries `/dev/urandom` (Unix). If the OS CSPRNG is unavailable,
+/// returns an error: production key generation MUST fail rather than
+/// fall back to weak time/PID-based entropy. A weak issuer key would
+/// let anyone forge activation codes.
+fn gather_entropy() -> Result<[u8; 32], &'static str> {
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
         let mut buf = [0u8; 32];
         if f.read_exact(&mut buf).is_ok() {
-            return (buf, true);
+            return Ok(buf);
         }
     }
-    // Fallback: NOT cryptographically strong. Warn loudly.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let pid = std::process::id() as u64;
-    let mut seed = now.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ pid.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    let mut out = [0u8; 32];
-    for chunk in out.chunks_mut(8) {
-        // xorshift64 + SHA-512 mixing via trv-core's SHA-512.
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        chunk.copy_from_slice(&seed.to_le_bytes());
-    }
-    (out, false)
+    Err("OS entropy (/dev/urandom) unavailable; refusing to generate weak key material")
 }
 
 fn cmd_keygen() -> i32 {
-    let (seed, strong) = gather_entropy();
-    if !strong {
-        eprintln!("WARNING: /dev/urandom unavailable; using weak fallback entropy.");
-        eprintln!("DO NOT use this key for production sales. Generate on a");
-        eprintln!("machine with a proper OS CSPRNG instead.");
-    }
+    let seed = match gather_entropy() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("keygen failed: {e}");
+            eprintln!("Generate on a machine with a proper OS CSPRNG instead.");
+            return 1;
+        }
+    };
     let (secret, public) = trv_core::crypto::ed25519::generate(&seed);
     println!("Issuer public key (embed in buyer binaries):");
     println!("{}", public.hex());
@@ -149,8 +143,15 @@ fn cmd_mint(args: &[String]) -> i32 {
         seed[i] = (hi * 16 + lo) as u8;
     }
 
-    // Random code_id from /dev/urandom (or fallback).
-    let (code_id_bytes, _) = gather_entropy();
+    // Random code_id from the OS CSPRNG. Fails closed if unavailable:
+    // a predictable code_id would make activation codes guessable.
+    let code_id_bytes = match gather_entropy() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("mint failed: {e}");
+            return 1;
+        }
+    };
     let mut code_id = [0u8; 16];
     code_id.copy_from_slice(&code_id_bytes[..16]);
 
@@ -214,6 +215,63 @@ fn cmd_verify(args: &[String]) -> i32 {
     }
 }
 
+/// One-time upgrade of a legacy plaintext vault file to the encrypted
+/// format: `sentinel vault-migrate --from <plain> --to <enc>`.
+///
+/// The passphrase is read from stdin (prompted on stderr) so it never
+/// appears in argv or shell history. The plaintext source is left in
+/// place; verify the encrypted copy opens, then delete it yourself.
+fn cmd_vault_migrate(args: &[String]) -> i32 {
+    let from = match parse_arg(args, "--from") {
+        Some(p) => p,
+        None => {
+            eprintln!("Usage: sentinel vault-migrate --from <plaintext> --to <encrypted>");
+            return 1;
+        }
+    };
+    let to = match parse_arg(args, "--to") {
+        Some(p) => p,
+        None => {
+            eprintln!("Usage: sentinel vault-migrate --from <plaintext> --to <encrypted>");
+            return 1;
+        }
+    };
+    eprint!("Vault passphrase: ");
+    let _ = io::stderr().flush();
+    let mut pass = String::new();
+    if io::stdin().read_line(&mut pass).is_err() {
+        eprintln!("could not read passphrase from stdin");
+        return 1;
+    }
+    // Strip the trailing newline without keeping a second copy.
+    let trimmed_len = pass.trim_end_matches(['\n', '\r']).len();
+    pass.truncate(trimmed_len);
+    let rc = match trv_backend::profile::ProfileVault::migrate_from_plaintext(
+        std::path::Path::new(&from),
+        std::path::Path::new(&to),
+        &pass,
+    ) {
+        Ok(()) => {
+            println!("Migrated to {to}.");
+            println!("Verify it opens (wrong passphrase fails closed), then delete {from}.");
+            0
+        }
+        Err(e) => {
+            eprintln!("MIGRATE FAILED: {e}");
+            1
+        }
+    };
+    // Best-effort: wipe the passphrase bytes before they are dropped
+    // (same write_volatile pattern as the vault's DerivedKey).
+    // SAFETY: zero bytes are valid UTF-8; the String is not used after this.
+    unsafe {
+        for b in pass.as_bytes_mut().iter_mut() {
+            core::ptr::write_volatile(b, 0u8);
+        }
+    }
+    rc
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -223,6 +281,7 @@ fn main() {
             "keygen" => std::process::exit(cmd_keygen()),
             "mint" => std::process::exit(cmd_mint(&args[1..])),
             "verify" => std::process::exit(cmd_verify(&args[1..])),
+            "vault-migrate" => std::process::exit(cmd_vault_migrate(&args[1..])),
             _ => {}
         }
     }

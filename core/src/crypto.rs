@@ -1,33 +1,60 @@
-//! Minimal on-device crypto stubs.
+//! Minimal on-device crypto.
 //!
-//! Real Ed25519/age wiring lands here later behind this stable API.
-//! Nothing leaves the device.
+//! Device identity keypairs are real Ed25519 (RFC 8032, pure Rust,
+//! std-only — see [`ed25519`]), generated from OS entropy. Key
+//! generation FAILS CLOSED when the OS CSPRNG is unavailable: there
+//! is no time/PID-based fallback anywhere in this crate.
 //!
-//! SECURITY WARNING — the stub key derivation below
-//! (`public[i] = secret[i].rotate_left(3) ^ 0xA5`) is REVERSIBLE and
-//! NOT secure: anyone holding a public key can trivially recover the
-//! secret key by applying `rotate_right(3) ^ 0xA5`. It exists only as
-//! a deterministic placeholder so the API shape is stable. It MUST be
-//! replaced by real Ed25519 (e.g. ed25519-dalek, MIT/Apache-2.0 — an
-//! external crate, intentionally not implemented here) before any
-//! production use, key exchange, or anything adversarial.
+//! SECURITY NOTE: the Ed25519 implementation is handwritten and NOT
+//! externally audited. Do not use for production sales or
+//! adversarial settings until an independent audit is complete.
 
 /// Pure-Rust Ed25519 (RFC 8032), std-only.
 ///
 /// NOT externally audited — see the module docs. Used for activation
-/// codes (issuer signatures). The older [`Keypair`] stub above remains
-/// for device identity and is unchanged by this module.
+/// codes (issuer signatures) and device identity keypairs.
 pub mod ed25519;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+/// ChaCha20-Poly1305 authenticated encryption (RFC 8439), std-only.
+///
+/// NOT externally audited — see the module docs. Used for the
+/// profile vault at rest.
+pub mod chacha20poly1305;
+
+/// PBKDF2-HMAC-SHA512 key derivation (RFC 8018), std-only.
+///
+/// NOT externally audited — see the module docs. Used to derive the
+/// profile-vault encryption key from a user passphrase.
+pub mod pbkdf2;
+
+use std::io::Read;
+
+/// Error from [`Keypair::generate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeypairError {
+    /// The OS CSPRNG (`/dev/urandom`) was unavailable. Generation
+    /// fails closed rather than falling back to weak entropy.
+    EntropyUnavailable,
+}
+
+impl std::fmt::Display for KeypairError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeypairError::EntropyUnavailable => {
+                f.write_str("OS entropy unavailable; refusing to generate a weak keypair")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeypairError {}
 
 /// 32-byte secret key. Never serialized off-device.
 ///
 /// Best-effort zeroization: [`Drop`] overwrites the bytes in place
 /// with [`core::ptr::write_volatile`] so the compiler cannot elide
 /// the wipe. This is best-effort only — copies (e.g. from
-/// [`Clone`]), compiler spills, and swap can retain key material;
-/// real key-hygiene still requires the production Ed25519 backend.
+/// [`Clone`]), compiler spills, and swap can retain key material.
 pub struct SecretKey([u8; 32]);
 
 impl Clone for SecretKey {
@@ -102,13 +129,6 @@ impl std::fmt::Debug for Keypair {
     }
 }
 
-fn xorshift64(mut x: u64) -> u64 {
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
-}
-
 /// 64-bit FNV-1a hash of `data`.
 ///
 /// A small, deterministic, dependency-free integrity hash shared by
@@ -133,34 +153,34 @@ pub fn fnv1a64_hex(data: &[u8]) -> String {
 }
 
 impl Keypair {
-    /// Generate a device-local keypair. No network, no keyserver.
-    pub fn generate() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| {
-                d.subsec_nanos() as u64
-                    ^ d.as_secs().wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            })
-            .unwrap_or(0x243F_6A88_85A3_08D3);
-        let mut s = seed;
-        let mut secret = [0u8; 32];
-        for chunk in secret.chunks_mut(8) {
-            s = xorshift64(s.wrapping_add(0x9E37_79B9_7F4A_7C15));
-            chunk.copy_from_slice(&s.to_le_bytes());
+    /// Generate a device-local keypair with real Ed25519. No network,
+    /// no keyserver.
+    ///
+    /// Entropy comes from the OS CSPRNG (`/dev/urandom`). If it is
+    /// unavailable, generation FAILS with
+    /// [`KeypairError::EntropyUnavailable`] rather than falling back
+    /// to time/PID-based entropy. A keypair generated from weak
+    /// entropy is worse than no keypair at all.
+    pub fn generate() -> Result<Self, KeypairError> {
+        let mut seed = [0u8; 32];
+        let mut f = std::fs::File::open("/dev/urandom")
+            .map_err(|_| KeypairError::EntropyUnavailable)?;
+        f.read_exact(&mut seed)
+            .map_err(|_| KeypairError::EntropyUnavailable)?;
+        let (secret, public) = ed25519::generate(&seed);
+        // Wipe the stack copy of the raw seed; the ed25519 SecretKey
+        // owns its own zeroizing copy.
+        for b in seed.iter_mut() {
+            // SAFETY: `b` is a valid, uniquely-borrowed byte; the
+            // volatile write targets exactly that location.
+            unsafe {
+                core::ptr::write_volatile(b, 0u8);
+            }
         }
-        // STUB public derivation — REVERSIBLE, NOT real Ed25519, NOT
-        // secure. public[i] = secret[i].rotate_left(3) ^ 0xA5 means the
-        // secret is recoverable from the public key with
-        // rotate_right(3) ^ 0xA5. Replace with ed25519-dalek
-        // (MIT/Apache-2.0) before any production use.
-        let mut public = [0u8; 32];
-        for (i, b) in secret.iter().enumerate() {
-            public[i] = b.rotate_left(3) ^ 0xA5;
-        }
-        Keypair {
-            secret: SecretKey(secret),
-            public: PublicKey(public),
-        }
+        Ok(Keypair {
+            secret: SecretKey(*secret.as_bytes()),
+            public: PublicKey(*public.as_bytes()),
+        })
     }
 
     /// Hex of the public key (chain address material).
@@ -179,25 +199,36 @@ mod tests {
 
     #[test]
     fn secret_key_exposes_32_raw_bytes() {
-        let keypair = Keypair::generate();
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         assert_eq!(keypair.secret.as_bytes().len(), 32);
     }
 
     #[test]
-    fn public_key_derives_deterministically_from_secret() {
-        // STUB rule: public[i] = secret[i].rotate_left(3) ^ 0xA5.
-        // Guard this invariant so the real Ed25519 wiring must
-        // intentionally change it, not silently.
-        let keypair = Keypair::generate();
+    fn public_key_is_real_ed25519_not_reversible_stub() {
+        // The old stub derived public[i] = secret[i].rotate_left(3) ^ 0xA5,
+        // which let anyone recover the secret from the public key.
+        // The real Ed25519 public key must NOT follow that rule, and
+        // must verify signatures made by the secret key.
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         let secret = keypair.secret.as_bytes();
-        for (i, b) in keypair.public.0.iter().enumerate() {
-            assert_eq!(*b, secret[i].rotate_left(3) ^ 0xA5, "byte {}", i);
-        }
+        let stub_matches = keypair
+            .public
+            .0
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b == secret[i].rotate_left(3) ^ 0xA5);
+        assert!(!stub_matches, "public key still follows the reversible stub rule");
+        // Real Ed25519: the keypair must sign/verify.
+        let ed_sec = ed25519::SecretKey::from_seed(*secret);
+        let ed_pub = ed25519::PublicKey::from_bytes(keypair.public.0);
+        let sig = ed25519::sign(&ed_sec, &ed_pub, b"sentinel");
+        assert!(ed25519::verify(&ed_pub, b"sentinel", &sig));
+        assert!(!ed25519::verify(&ed_pub, b"tampered", &sig));
     }
 
     #[test]
     fn public_hex_is_64_lowercase_hex_chars() {
-        let keypair = Keypair::generate();
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         let hex = keypair.public_hex();
         assert_eq!(hex.len(), 64);
         assert!(hex
@@ -207,7 +238,7 @@ mod tests {
 
     #[test]
     fn public_hex_round_trips_public_bytes() {
-        let keypair = Keypair::generate();
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         let hex = keypair.public_hex();
         let bytes: Vec<u8> = hex
             .as_bytes()
@@ -223,7 +254,7 @@ mod tests {
 
     #[test]
     fn keypair_clone_and_public_copy_preserve_keys() {
-        let keypair = Keypair::generate();
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         let cloned = keypair.clone();
         assert_eq!(cloned.public, keypair.public);
         assert_eq!(cloned.secret.as_bytes(), keypair.secret.as_bytes());
@@ -233,7 +264,7 @@ mod tests {
 
     #[test]
     fn debug_never_leaks_secret_material() {
-        let keypair = Keypair::generate();
+        let keypair = Keypair::generate().expect("test env provides /dev/urandom");
         let secret_dbg = format!("{:?}", keypair.secret);
         let pair_dbg = format!("{:?}", keypair);
         // The redaction marker must appear...

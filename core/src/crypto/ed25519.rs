@@ -33,10 +33,12 @@
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
-// SHA-512 (FIPS 180-4), needed by Ed25519. Private to this module.
+// SHA-512 (FIPS 180-4), needed by Ed25519 and the vault KDF.
+// `pub(crate)`: shared with the crate's other crypto modules; the raw
+// digest is not part of the public API.
 // ---------------------------------------------------------------------------
 
-mod sha512 {
+pub(crate) mod sha512 {
     /// Round constants: fractional parts of the cube roots of the first
     /// 80 primes (FIPS 180-4 §4.2.3).
     #[rustfmt::skip]
