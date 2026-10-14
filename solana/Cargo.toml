@@ -1,0 +1,18 @@
+[package]
+name = "trv-solana"
+version = "0.1.0"
+edition = "2021"
+description = "TRV token programs (Solana): fixed-supply mint, transfer hook with outside-wallet fee, 90-day staking. Chain-agnostic pure-Rust logic; see README.md for deploy."
+
+# Standalone crate: intentionally NOT a member of the parent workspace
+# (parent Cargo.toml lists members explicitly). The empty [workspace]
+# table below stops cargo from walking up to the parent workspace root.
+[workspace]
+
+[lib]
+name = "trv_solana"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
