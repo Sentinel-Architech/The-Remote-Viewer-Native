@@ -11,6 +11,7 @@ pub mod hw;
 pub mod hydra;
 pub mod identity;
 pub mod mail;
+pub mod mesh;
 pub mod messaging;
 pub mod moe;
 pub mod neuroling;

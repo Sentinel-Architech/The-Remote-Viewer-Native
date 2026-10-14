@@ -92,6 +92,13 @@ pub enum TransportError {
     /// Transmit sequence counter reached `u64::MAX`. Rekey instead
     /// of wrapping.
     SequenceExhausted,
+    /// The platform transport failed to hand a frame to the OS
+    /// network stack. The mesh layer treats this as "peer currently
+    /// unreachable" and queues rather than dropping.
+    SendFailed,
+    /// A control blob (rekey offer/accept) failed authentication or
+    /// structural checks. The current channel is untouched.
+    RekeyFailed,
 }
 
 impl std::fmt::Display for TransportError {
@@ -112,6 +119,12 @@ impl std::fmt::Display for TransportError {
             TransportError::SequenceExhausted => {
                 f.write_str("sequence counter exhausted; rekey required")
             }
+            TransportError::SendFailed => {
+                f.write_str("platform transport could not send the frame")
+            }
+            TransportError::RekeyFailed => {
+                f.write_str("rekey control blob failed authentication; channel unchanged")
+            }
         }
     }
 }
@@ -120,7 +133,7 @@ impl std::error::Error for TransportError {}
 
 /// Best-effort in-place wipe, matching the codebase's `SecretKey`
 /// pattern: `write_volatile` keeps the compiler from eliding it.
-fn wipe(bytes: &mut [u8]) {
+pub(crate) fn wipe(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {
         // SAFETY: `b` is a valid, uniquely-borrowed byte.
         unsafe {
@@ -306,6 +319,13 @@ impl IdentityKey {
     /// The public identity other peers pin or expect.
     pub fn public(&self) -> &PublicKey {
         &self.public
+    }
+
+    /// Sign `msg` with the identity secret. The secret never leaves;
+    /// this is the only signing path the mesh layer needs (contact
+    /// cards, discovery adverts).
+    pub fn sign(&self, msg: &[u8]) -> Signature {
+        ed25519::sign(&self.secret, &self.public, msg)
     }
 }
 
@@ -532,12 +552,25 @@ fn derive_channels(
     e_resp: &[u8; 32],
     is_initiator: bool,
 ) -> Result<Channel, TransportError> {
+    derive_channels_with(shared, e_init, e_resp, is_initiator, KDF_INFO_PREFIX)
+}
+
+/// [`derive_channels`] with an explicit KDF domain-separation prefix.
+/// Rekeying uses [`REKEY_INFO_PREFIX`] so rekeyed keys can never
+/// collide with initial-handshake keys even if an ephemeral repeats.
+fn derive_channels_with(
+    shared: &[u8; 32],
+    e_init: &[u8; 32],
+    e_resp: &[u8; 32],
+    is_initiator: bool,
+    info_prefix: &[u8],
+) -> Result<Channel, TransportError> {
     if shared == &[0u8; 32] {
         return Err(TransportError::BadPeerKey);
     }
     let prk = hkdf_extract(&[0u8; 64], shared);
-    let mut info = Vec::with_capacity(KDF_INFO_PREFIX.len() + 64);
-    info.extend_from_slice(KDF_INFO_PREFIX);
+    let mut info = Vec::with_capacity(info_prefix.len() + 64);
+    info.extend_from_slice(info_prefix);
     info.extend_from_slice(e_init);
     info.extend_from_slice(e_resp);
     // OKM layout: k_i2r(32) || k_r2i(32) || prefix_i2r(4) || prefix_r2i(4).
@@ -759,6 +792,549 @@ pub fn establish_auth(
     let (rchan, response) = resp.respond_auth(&hello, id_init.public(), id_resp)?;
     let ichan = init.finish_auth(&response, id_resp.public(), id_init.public())?;
     Ok((ichan, rchan))
+}
+
+// =====================================================================
+// Mesh link layer: peer identity, platform transport trait, discovery
+// adverts, and the rekeying SecureChannel.
+// =====================================================================
+//
+// The core NEVER calls socket APIs directly. Every network byte flows
+// through the [`Transport`] trait, implemented by the platform (UDP
+// sockets on Android, loopback in tests). The [`SecureChannel`]
+// provides the mutually-authenticated encrypted link with periodic
+// rekeying; [`PeerAdvert`] is the signed presence format for local
+// discovery.
+
+/// A peer on the mesh: the 32-byte Ed25519 long-term identity public
+/// key. No central registry — identity is self-sovereign and pinned
+/// out-of-band (QR contact card) or learned from a trusted exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerId(pub [u8; 32]);
+
+impl PeerId {
+    /// Build from an Ed25519 public key.
+    pub fn from_public(key: &PublicKey) -> Self {
+        Self(*key.as_bytes())
+    }
+
+    /// The raw 32 bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Back to a typed public key (no validation; Ed25519 validates on use).
+    pub fn to_public(&self) -> PublicKey {
+        PublicKey::from_bytes(self.0)
+    }
+}
+
+/// Reachability of a peer, as last observed by the platform transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerStatus {
+    /// A recent frame or discovery advert was seen: reachable now.
+    Online,
+    /// Seen before, currently silent/unreachable.
+    Offline,
+    /// Never seen: no information.
+    Unknown,
+}
+
+/// Failures for [`PeerAdvert`] parsing and verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertError {
+    /// Payload exceeds the advert size cap.
+    TooLarge,
+    /// Magic bytes do not match.
+    BadMagic,
+    /// Unsupported advert version.
+    BadVersion,
+    /// Payload ends before all fields are read.
+    Truncated,
+    /// Bytes remain after the final field.
+    TrailingGarbage,
+    /// Display name empty/overlong/invalid UTF-8.
+    InvalidName,
+    /// Handle empty/overlong/invalid UTF-8 or charset.
+    InvalidHandle,
+    /// Ed25519 signature does not verify against the embedded peer id.
+    BadSignature,
+}
+
+impl std::fmt::Display for AdvertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AdvertError::TooLarge => "advert too large",
+            AdvertError::BadMagic => "bad advert magic",
+            AdvertError::BadVersion => "unsupported advert version",
+            AdvertError::Truncated => "truncated advert",
+            AdvertError::TrailingGarbage => "trailing garbage in advert",
+            AdvertError::InvalidName => "invalid display name",
+            AdvertError::InvalidHandle => "invalid handle",
+            AdvertError::BadSignature => "advert signature invalid",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::error::Error for AdvertError {}
+
+/// Magic opening every peer advert.
+const ADVERT_MAGIC: &[u8; 4] = b"TRVA";
+/// Advert format version.
+const ADVERT_VERSION: u8 = 0x01;
+/// Maximum advert wire size.
+pub const MAX_ADVERT_BYTES: usize = 512;
+/// Domain separation for the advert signature.
+const ADVERT_SIGN_DOMAIN: &[u8] = b"TRV-PEER-ADVERT-v1";
+
+/// A signed presence advertisement for local discovery.
+///
+/// Wire: `TRVA(4) || version(1) || peer_id(32) || name_len(1) || name ||
+/// handle_len(1) || handle || onion_pub(32) || issued_at_be(8) || sig(64)`.
+///
+/// Adverts carry PUBLIC information only: identity key, display name,
+/// handle, the X25519 onion-routing public key (for [`crate::mesh`]
+/// blind-relay layers), and an issue timestamp. Never secrets. The
+/// signature (over `ADVERT_SIGN_DOMAIN ||` the preceding bytes) proves
+/// the advert was made by the identity it claims.
+#[derive(Debug, Clone)]
+pub struct PeerAdvert {
+    peer_id: [u8; 32],
+    display_name: String,
+    handle: String,
+    onion_pub: [u8; 32],
+    issued_at: u64,
+    signature: [u8; 64],
+}
+
+impl PeerAdvert {
+    /// Sign a fresh advert. `issued_at` is caller-supplied Unix seconds
+    /// (informational; there is no trusted on-device clock).
+    pub fn sign(
+        secret: &SecretKey,
+        public: &PublicKey,
+        display_name: &str,
+        handle: &str,
+        onion_pub: &[u8; 32],
+        issued_at: u64,
+    ) -> Result<Self, AdvertError> {
+        Self::sign_with(public, display_name, handle, onion_pub, issued_at, &|msg| {
+            ed25519::sign(secret, public, msg)
+        })
+    }
+
+    /// Sign a fresh advert with a caller-provided signing closure.
+    /// Lets holders that keep their secret behind an API (like
+    /// [`IdentityKey`]) sign adverts without exposing it.
+    pub fn sign_with(
+        public: &PublicKey,
+        display_name: &str,
+        handle: &str,
+        onion_pub: &[u8; 32],
+        issued_at: u64,
+        signer: &dyn Fn(&[u8]) -> Signature,
+    ) -> Result<Self, AdvertError> {
+        if display_name.is_empty()
+            || display_name.chars().count() > 32
+            || handle.is_empty()
+            || handle.chars().count() > 48
+            || !handle
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        {
+            return Err(if display_name.is_empty() || display_name.chars().count() > 32 {
+                AdvertError::InvalidName
+            } else {
+                AdvertError::InvalidHandle
+            });
+        }
+        let peer_id = *public.as_bytes();
+        let mut body = Vec::new();
+        body.extend_from_slice(ADVERT_MAGIC);
+        body.push(ADVERT_VERSION);
+        body.extend_from_slice(&peer_id);
+        body.push(display_name.len() as u8);
+        body.extend_from_slice(display_name.as_bytes());
+        body.push(handle.len() as u8);
+        body.extend_from_slice(handle.as_bytes());
+        body.extend_from_slice(onion_pub);
+        body.extend_from_slice(&issued_at.to_be_bytes());
+        let mut msg = Vec::with_capacity(ADVERT_SIGN_DOMAIN.len() + body.len());
+        msg.extend_from_slice(ADVERT_SIGN_DOMAIN);
+        msg.extend_from_slice(&body);
+        let sig = signer(&msg);
+        wipe(&mut msg);
+        Ok(Self {
+            peer_id,
+            display_name: display_name.to_string(),
+            handle: handle.to_string(),
+            onion_pub: *onion_pub,
+            issued_at,
+            signature: *sig.as_bytes(),
+        })
+    }
+
+    /// Serialize to wire bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(ADVERT_MAGIC);
+        out.push(ADVERT_VERSION);
+        out.extend_from_slice(&self.peer_id);
+        out.push(self.display_name.len() as u8);
+        out.extend_from_slice(self.display_name.as_bytes());
+        out.push(self.handle.len() as u8);
+        out.extend_from_slice(self.handle.as_bytes());
+        out.extend_from_slice(&self.onion_pub);
+        out.extend_from_slice(&self.issued_at.to_be_bytes());
+        out.extend_from_slice(&self.signature);
+        out
+    }
+
+    /// Parse and signature-verify wire bytes. Fails closed on any
+    /// structural or cryptographic problem.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AdvertError> {
+        if bytes.len() > MAX_ADVERT_BYTES {
+            return Err(AdvertError::TooLarge);
+        }
+        // Fixed prefix: magic(4) + version(1) + peer_id(32) = 37.
+        if bytes.len() < 37 + 1 + 1 + 32 + 8 + 64 {
+            return Err(AdvertError::Truncated);
+        }
+        if &bytes[..4] != ADVERT_MAGIC {
+            return Err(AdvertError::BadMagic);
+        }
+        if bytes[4] != ADVERT_VERSION {
+            return Err(AdvertError::BadVersion);
+        }
+        let mut peer_id = [0u8; 32];
+        peer_id.copy_from_slice(&bytes[5..37]);
+        let mut pos = 37;
+        let name_len = bytes[pos] as usize;
+        pos += 1;
+        if bytes.len() < pos + name_len + 1 {
+            return Err(AdvertError::Truncated);
+        }
+        let display_name =
+            std::str::from_utf8(&bytes[pos..pos + name_len]).map_err(|_| AdvertError::InvalidName)?;
+        if display_name.is_empty() || display_name.chars().count() > 32 {
+            return Err(AdvertError::InvalidName);
+        }
+        pos += name_len;
+        let handle_len = bytes[pos] as usize;
+        pos += 1;
+        if bytes.len() < pos + handle_len + 32 + 8 + 64 {
+            return Err(AdvertError::Truncated);
+        }
+        let handle =
+            std::str::from_utf8(&bytes[pos..pos + handle_len]).map_err(|_| AdvertError::InvalidHandle)?;
+        if handle.is_empty()
+            || handle.chars().count() > 48
+            || !handle
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        {
+            return Err(AdvertError::InvalidHandle);
+        }
+        pos += handle_len;
+        let mut onion_pub = [0u8; 32];
+        onion_pub.copy_from_slice(&bytes[pos..pos + 32]);
+        pos += 32;
+        let mut ts = [0u8; 8];
+        ts.copy_from_slice(&bytes[pos..pos + 8]);
+        let issued_at = u64::from_be_bytes(ts);
+        pos += 8;
+        if bytes.len() != pos + 64 {
+            return Err(if bytes.len() < pos + 64 {
+                AdvertError::Truncated
+            } else {
+                AdvertError::TrailingGarbage
+            });
+        }
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&bytes[pos..pos + 64]);
+        let mut msg = Vec::with_capacity(ADVERT_SIGN_DOMAIN.len() + pos);
+        msg.extend_from_slice(ADVERT_SIGN_DOMAIN);
+        msg.extend_from_slice(&bytes[..pos]);
+        let public = PublicKey::from_bytes(peer_id);
+        let sig = Signature::from_bytes(signature);
+        let ok = ed25519::verify(&public, &msg, &sig);
+        wipe(&mut msg);
+        if !ok {
+            return Err(AdvertError::BadSignature);
+        }
+        Ok(Self {
+            peer_id,
+            display_name: display_name.to_string(),
+            handle: handle.to_string(),
+            onion_pub,
+            issued_at,
+            signature,
+        })
+    }
+
+    /// The advertised peer identity.
+    pub fn peer_id(&self) -> PeerId {
+        PeerId(self.peer_id)
+    }
+
+    /// User-chosen display name.
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// `Username@RV.com`-style handle.
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    /// The peer's X25519 onion-routing public key (blind-relay layers).
+    pub fn onion_pub(&self) -> &[u8; 32] {
+        &self.onion_pub
+    }
+
+    /// Caller-supplied issue time (informational only).
+    pub fn issued_at(&self) -> u64 {
+        self.issued_at
+    }
+}
+
+/// The platform's byte pipe. The core NEVER calls socket APIs directly:
+/// every network byte flows through this trait, implemented by the
+/// platform (UDP/broadcast sockets on Android, loopback in tests).
+///
+/// ## Hard invariant
+///
+/// Bytes handed to [`Transport::send_frame`] are ALWAYS already-encrypted
+/// sealed frames (link frames from [`SecureChannel`] or onion packets).
+/// The transport MUST treat them as opaque: no interpretation, no
+/// logging of contents, no retention beyond delivery. Plaintext NEVER
+/// reaches this trait.
+///
+/// ## Zero-delay live path
+///
+/// [`Transport::recv_frame`] MUST NOT block, sleep, or batch: it drains
+/// whatever the OS has already delivered and returns. The mesh layer
+/// calls it in a tight drain loop, so live chat, calls, and other
+/// real-time communication move with zero artificial delay. The offline
+/// queue exists ONLY for peers that are unreachable — it is never a
+/// delay mechanism for the live path.
+pub trait Transport {
+    /// Hand opaque bytes to the OS for delivery to `peer`. Returns
+    /// immediately; delivery itself is best-effort (the mesh layer
+    /// owns retry and queueing). Fails with
+    /// [`TransportError::SendFailed`] if the frame cannot even be
+    /// handed off.
+    fn send_frame(&mut self, peer: &PeerId, bytes: &[u8]) -> Result<(), TransportError>;
+
+    /// Non-blocking drain of one pending inbound frame: returns the
+    /// sender's [`PeerId`] and the opaque bytes, or `None` when the
+    /// OS has nothing waiting. MUST NOT block or sleep.
+    fn recv_frame(&mut self) -> Option<(PeerId, Vec<u8>)>;
+
+    /// Ask the platform for currently visible peers (UDP broadcast /
+    /// mDNS beacons). Returns structurally parsed adverts; the mesh
+    /// layer verifies signatures before trusting them.
+    fn discover_peers(&mut self) -> Vec<PeerAdvert>;
+
+    /// Last observed reachability of a peer.
+    fn peer_status(&self, peer: &PeerId) -> PeerStatus;
+}
+
+/// Rekey after this many sealed messages, or after
+/// [`REKEY_AFTER_SECS`] seconds — whichever comes first.
+pub const REKEY_AFTER_MESSAGES: u64 = 10_000;
+/// Rekey after this many seconds on one key set, or after
+/// [`REKEY_AFTER_MESSAGES`] messages — whichever comes first.
+pub const REKEY_AFTER_SECS: u64 = 3_600;
+/// KDF domain separation for rekeyed epochs. Distinct from
+/// [`KDF_INFO_PREFIX`] so a rekey can never derive the same keys as
+/// the initial handshake, even if an ephemeral repeats.
+const REKEY_INFO_PREFIX: &[u8] = b"TRV-REKEY-v1";
+/// Rekey control blobs reuse the authenticated-hello shape:
+/// `eph_pub(32) || identity_pub(32) || sig(64)`.
+pub const REKEY_BLOB_LEN: usize = AUTH_HELLO_LEN;
+
+/// In-flight state for the side that initiated a rekey. The ephemeral
+/// secret is wiped on drop.
+pub struct RekeyOffer {
+    secret: [u8; 32],
+    public: [u8; 32],
+}
+
+impl std::fmt::Debug for RekeyOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RekeyOffer")
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for RekeyOffer {
+    fn drop(&mut self) {
+        wipe(&mut self.secret);
+    }
+}
+
+/// An encrypted link with periodic rekeying.
+///
+/// Wraps a [`Channel`] (mutually-authenticated X25519 handshake via
+/// the long-term Ed25519 identities, ChaCha20-Poly1305 frames with
+/// sequence-bound nonces and replay protection) and adds forward
+/// secrecy through rekeying: after [`REKEY_AFTER_MESSAGES`] sealed
+/// messages or [`REKEY_AFTER_SECS`] seconds, the two sides run a fresh
+/// ephemeral exchange — authenticated by the same identity keys — and
+/// move to a new key epoch. A later key compromise then exposes only
+/// the current epoch, never earlier traffic.
+///
+/// Rekey control blobs travel as mesh link frames; the mesh layer
+/// drives the exchange:
+///
+/// ```text
+/// A -> B:  RekeyOffer   = auth(eph_a)            (begin_rekey)
+/// B -> A:  RekeyAccept  = auth(eph_b)            (accept_rekey)
+/// A:       derive from X25519(eph_a, eph_b)       (finish_rekey)
+/// ```
+///
+/// Both blobs are Ed25519-signed over `eph || recipient_identity`,
+/// exactly like handshake hellos, so offers cannot be forged or
+/// forwarded to another peer. If both sides offer simultaneously, the
+/// side whose own [`PeerId`] is lexicographically smaller keeps its
+/// offer and the other side accepts (deterministic tie-break, no
+/// extra round trip).
+pub struct SecureChannel {
+    channel: Channel,
+    peer: PeerId,
+    sealed_count: u64,
+    epoch_start: u64,
+}
+
+impl std::fmt::Debug for SecureChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureChannel")
+            .field("channel", &self.channel)
+            .field("peer", &self.peer)
+            .field("sealed_count", &self.sealed_count)
+            .field("epoch_start", &self.epoch_start)
+            .finish()
+    }
+}
+
+impl SecureChannel {
+    /// Wrap an established [`Channel`] (from the authenticated
+    /// handshake). `now_secs` is caller-supplied time for the rekey
+    /// age trigger; there is no trusted on-device clock.
+    pub fn from_channel(channel: Channel, peer: PeerId, now_secs: u64) -> Self {
+        Self {
+            channel,
+            peer,
+            sealed_count: 0,
+            epoch_start: now_secs,
+        }
+    }
+
+    /// The peer at the other end of this channel.
+    pub fn peer(&self) -> &PeerId {
+        &self.peer
+    }
+
+    /// Messages sealed in the current epoch.
+    pub fn sealed_count(&self) -> u64 {
+        self.sealed_count
+    }
+
+    /// Seal `plaintext` into a frame. Counts toward the rekey policy.
+    pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, TransportError> {
+        let frame = self.channel.seal(plaintext)?;
+        self.sealed_count = self.sealed_count.saturating_add(1);
+        Ok(frame)
+    }
+
+    /// Open a frame from the peer. Rekeying does not change the wire
+    /// format: frames from the previous epoch fail authentication
+    /// here (fail closed) once the epoch has moved on.
+    pub fn open(&mut self, frame: &[u8]) -> Result<Vec<u8>, TransportError> {
+        self.channel.open(frame)
+    }
+
+    /// True when the rekey policy says this epoch is done: enough
+    /// messages sealed, or the epoch is old enough.
+    pub fn needs_rekey(&self, now_secs: u64) -> bool {
+        self.sealed_count >= REKEY_AFTER_MESSAGES
+            || now_secs.saturating_sub(self.epoch_start) >= REKEY_AFTER_SECS
+    }
+
+    /// Start a rekey: mint a fresh ephemeral and build the signed
+    /// offer blob for the peer. Returns the in-flight offer state
+    /// (keep until the accept arrives) and the blob to send.
+    pub fn begin_rekey(
+        &self,
+        id: &IdentityKey,
+        peer_pub: &PublicKey,
+    ) -> Result<(RekeyOffer, [u8; REKEY_BLOB_LEN]), TransportError> {
+        let secret = random32()?;
+        let public = x25519(&secret, &BASE_POINT);
+        let blob = auth_blob(&public, id, peer_pub);
+        Ok((RekeyOffer { secret, public }, blob))
+    }
+
+    /// Accept a peer's rekey offer: verify it, derive the new epoch,
+    /// and build our signed accept blob. The new channel replaces
+    /// this one immediately — the caller must swap it in and send
+    /// the accept blob back.
+    pub fn accept_rekey(
+        &self,
+        offer: &[u8; REKEY_BLOB_LEN],
+        id: &IdentityKey,
+        peer_pub: &PublicKey,
+        now_secs: u64,
+    ) -> Result<(SecureChannel, [u8; REKEY_BLOB_LEN]), TransportError> {
+        let eph_offer = verify_auth_blob(offer, peer_pub, id.public())
+            .map_err(|_| TransportError::RekeyFailed)?;
+        check_peer_key(&eph_offer).map_err(|_| TransportError::RekeyFailed)?;
+        let mut secret_b = random32().map_err(|_| TransportError::RekeyFailed)?;
+        let public_b = x25519(&secret_b, &BASE_POINT);
+        let mut shared = x25519(&secret_b, &eph_offer);
+        wipe(&mut secret_b);
+        let channel = derive_channels_with(&shared, &eph_offer, &public_b, false, REKEY_INFO_PREFIX)
+            .map_err(|_| TransportError::RekeyFailed)?;
+        wipe(&mut shared);
+        let accept = auth_blob(&public_b, id, peer_pub);
+        Ok((
+            SecureChannel {
+                channel,
+                peer: self.peer,
+                sealed_count: 0,
+                epoch_start: now_secs,
+            },
+            accept,
+        ))
+    }
+
+    /// Complete our initiated rekey with the peer's accept blob.
+    /// Returns the new-epoch channel to swap in.
+    pub fn finish_rekey(
+        &self,
+        offer: &RekeyOffer,
+        accept: &[u8; REKEY_BLOB_LEN],
+        id: &IdentityKey,
+        peer_pub: &PublicKey,
+        now_secs: u64,
+    ) -> Result<SecureChannel, TransportError> {
+        let eph_accept = verify_auth_blob(accept, peer_pub, id.public())
+            .map_err(|_| TransportError::RekeyFailed)?;
+        check_peer_key(&eph_accept).map_err(|_| TransportError::RekeyFailed)?;
+        let mut shared = x25519(&offer.secret, &eph_accept);
+        let channel = derive_channels_with(&shared, &offer.public, &eph_accept, true, REKEY_INFO_PREFIX)
+            .map_err(|_| TransportError::RekeyFailed)?;
+        wipe(&mut shared);
+        Ok(SecureChannel {
+            channel,
+            peer: self.peer,
+            sealed_count: 0,
+            epoch_start: now_secs,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1147,6 +1723,116 @@ mod tests {
         assert_ne!(o1, o3);
         // Multi-block output differs per block (counter domain separation).
         assert_ne!(&o1[..64], &o1[64..]);
+    }
+
+    #[test]
+    fn secure_channel_rekey_by_age() {
+        let id_a = IdentityKey::generate(&[0xA1u8; 32]);
+        let id_b = IdentityKey::generate(&[0xB2u8; 32]);
+        let (ca, cb) = establish_auth(&id_a, &id_b).unwrap();
+        let pb = PeerId::from_public(id_b.public());
+        let pa = PeerId::from_public(id_a.public());
+        let mut sa = SecureChannel::from_channel(ca, pb, 0);
+        let mut sb = SecureChannel::from_channel(cb, pa, 0);
+        // Fresh epochs do not need rekey; aged ones do.
+        assert!(!sa.needs_rekey(100));
+        assert!(sa.needs_rekey(REKEY_AFTER_SECS + 1));
+        assert_eq!(sa.sealed_count(), 0);
+        let f = sa.seal(b"epoch one").unwrap();
+        assert_eq!(sa.sealed_count(), 1);
+        assert_eq!(sb.open(&f).unwrap(), b"epoch one");
+
+        // Run the rekey exchange.
+        let (offer, offer_blob) = sa.begin_rekey(&id_a, id_b.public()).unwrap();
+        let (new_sb, accept_blob) = sb
+            .accept_rekey(&offer_blob, &id_b, id_a.public(), REKEY_AFTER_SECS + 1)
+            .unwrap();
+        sb = new_sb;
+        let new_sa = sa
+            .finish_rekey(&offer, &accept_blob, &id_a, id_b.public(), REKEY_AFTER_SECS + 1)
+            .unwrap();
+        sa = new_sa;
+
+        // Data flows on the new epoch both ways.
+        let f = sa.seal(b"epoch two").unwrap();
+        assert_eq!(sb.open(&f).unwrap(), b"epoch two");
+        let f = sb.seal(b"epoch two back").unwrap();
+        assert_eq!(sa.open(&f).unwrap(), b"epoch two back");
+        // Fresh epoch: no rekey needed, counter reset.
+        assert!(!sa.needs_rekey(REKEY_AFTER_SECS + 2));
+        assert_eq!(sa.sealed_count(), 1);
+    }
+
+    #[test]
+    fn secure_channel_forged_rekey_rejected() {
+        let id_a = IdentityKey::generate(&[0xC1u8; 32]);
+        let id_b = IdentityKey::generate(&[0xC2u8; 32]);
+        let id_evil = IdentityKey::generate(&[0xC3u8; 32]);
+        let (ca, cb) = establish_auth(&id_a, &id_b).unwrap();
+        let pb = PeerId::from_public(id_b.public());
+        let pa = PeerId::from_public(id_a.public());
+        let sa = SecureChannel::from_channel(ca, pb, 0);
+        let sb = SecureChannel::from_channel(cb, pa, 0);
+
+        // Attacker forges an offer blob (valid shape, wrong signer).
+        let evil_eph = InitiatorHandshake::new().unwrap();
+        let evil_blob = evil_eph.hello_auth(&id_evil, id_b.public());
+        assert_eq!(
+            sb.accept_rekey(&evil_blob, &id_b, id_a.public(), 10)
+                .unwrap_err(),
+            TransportError::RekeyFailed
+        );
+        // Bit-flipped offer.
+        let (offer, mut offer_blob) = sa.begin_rekey(&id_a, id_b.public()).unwrap();
+        offer_blob[7] ^= 0x80;
+        assert_eq!(
+            sb.accept_rekey(&offer_blob, &id_b, id_a.public(), 10)
+                .unwrap_err(),
+            TransportError::RekeyFailed
+        );
+        // Forged accept on the initiator side.
+        let (_offer2, offer_blob2) = sa.begin_rekey(&id_a, id_b.public()).unwrap();
+        let mut evil_accept = offer_blob2;
+        evil_accept[100] ^= 0x01;
+        assert_eq!(
+            sa.finish_rekey(&offer, &evil_accept, &id_a, id_b.public(), 10)
+                .unwrap_err(),
+            TransportError::RekeyFailed
+        );
+        // Low-order ephemeral in offer is rejected before the KDF.
+        let mut low = offer_blob2;
+        low[..32].copy_from_slice(&[0u8; 32]);
+        assert_eq!(
+            sb.accept_rekey(&low, &id_b, id_a.public(), 10).unwrap_err(),
+            TransportError::RekeyFailed
+        );
+    }
+
+    #[test]
+    fn peer_advert_rejects_tampering() {
+        let id = IdentityKey::generate(&[0xD1u8; 32]);
+        let advert = PeerAdvert::sign_with(
+            id.public(),
+            "Dana",
+            "dana",
+            &[0x77; 32],
+            9000,
+            &|m| id.sign(m),
+        )
+        .expect("sign");
+        let bytes = advert.to_bytes();
+        assert!(PeerAdvert::from_bytes(&bytes).is_ok());
+        // Flip each region: magic, version, name, signature.
+        for idx in [0usize, 4, 40, bytes.len() - 1] {
+            let mut bad = bytes.clone();
+            bad[idx] ^= 0x01;
+            assert!(PeerAdvert::from_bytes(&bad).is_err(), "idx {idx}");
+        }
+        // Truncation and trailing garbage.
+        assert!(PeerAdvert::from_bytes(&bytes[..bytes.len() - 10]).is_err());
+        let mut long = bytes.clone();
+        long.push(0x00);
+        assert!(PeerAdvert::from_bytes(&long).is_err());
     }
 
     #[test]
