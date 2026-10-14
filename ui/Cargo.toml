@@ -1,0 +1,11 @@
+[package]
+name = "trv-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Remote Viewer Network portable UI core: zero platform APIs, software rendering, text-mode fallback. MIT."
+
+[dependencies]
+trv-core = { path = "../core" }
+
+[dev-dependencies]

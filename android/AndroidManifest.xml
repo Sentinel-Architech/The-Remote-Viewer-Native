@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Remote Viewer Network — v0.1 Android manifest.
+     No permissions requested. The whole app is one NativeActivity whose
+     native entry point (ANativeActivity_onCreate) lives in libtrv_android.so.
+     Assembled with aapt2 directly — no Gradle, no Play Services. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="network.remoteviewer.trv">
+
+    <application
+        android:label="The Remote Viewer Network"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|keyboard|keyboardHidden|screenLayout|screenSize|smallestScreenSize|density"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="trv_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

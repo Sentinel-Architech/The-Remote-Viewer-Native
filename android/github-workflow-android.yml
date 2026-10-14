@@ -1,0 +1,112 @@
+# Ready-to-place GitHub Actions workflow for the TRV v0.1 APK.
+# Copy to `.github/workflows/android.yml` at the repo root when pushing.
+# Free for public repos (build takes ~10-15 min, well under the free quota).
+#
+# Repo layout assumed (paths relative to repo root):
+#   native-core/ui/            -> trv-ui crate
+#   native-core/android/       -> trv-android crate + AndroidManifest.xml
+# Adjust the `working-directory` / paths if the layout differs.
+
+name: android-apk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "native-core/android/**"
+      - "native-core/ui/**"
+      - "native-core/core/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: "r27"
+  BUILD_TOOLS: "34.0.0"
+  MIN_SDK: "26"
+  TARGET_SDK: "34"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+
+      - name: Install Android NDK
+        run: |
+          cd /tmp
+          curl -sSL -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install SDK build-tools (aapt2, zipalign, apksigner)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq unzip zip
+          mkdir -p /tmp/sdk/cmdline-tools
+          cd /tmp/sdk/cmdline-tools
+          curl -sSL -o tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q tools.zip
+          mv cmdline-tools latest
+          export ANDROID_HOME=/tmp/sdk
+          echo "ANDROID_HOME=/tmp/sdk" >> "$GITHUB_ENV"
+          echo "/tmp/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-${TARGET_SDK}" "build-tools;${BUILD_TOOLS}"
+
+      - name: Configure Android linker
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${TARGET_SDK}-clang"
+          [target.armv7-linux-androideabi]
+          linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi${TARGET_SDK}-clang"
+          EOF
+
+      - name: Build native libraries
+        run: |
+          cargo build --release --target aarch64-linux-android -p trv-android
+          cargo build --release --target armv7-linux-androideabi -p trv-android
+          "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            target/aarch64-linux-android/release/libtrv_android.so \
+            target/armv7-linux-androideabi/release/libtrv_android.so
+
+      - name: Assemble APK with aapt2 (no Gradle)
+        run: |
+          BT=/tmp/sdk/build-tools/${BUILD_TOOLS}
+          rm -rf /tmp/apk && mkdir -p /tmp/apk/lib/arm64-v8a /tmp/apk/lib/armeabi-v7a
+          cp target/aarch64-linux-android/release/libtrv_android.so /tmp/apk/lib/arm64-v8a/
+          cp target/armv7-linux-androideabi/release/libtrv_android.so /tmp/apk/lib/armeabi-v7a/
+          "$BT/aapt2" link -o /tmp/base.apk \
+            -I /tmp/sdk/platforms/android-${TARGET_SDK}/android.jar \
+            --manifest android/AndroidManifest.xml \
+            --min-sdk-version "${MIN_SDK}" \
+            --target-sdk-version "${TARGET_SDK}"
+          cd /tmp/apk && zip -q -r /tmp/base.apk .
+          "$BT/zipalign" -p 4 /tmp/base.apk /tmp/aligned.apk
+
+      - name: Sign (debug key, v0.1)
+        run: |
+          BT=/tmp/sdk/build-tools/${BUILD_TOOLS}
+          keytool -genkeypair -v -keystore /tmp/debug.keystore -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10950 \
+            -storepass android -keypass android \
+            -dname "CN=TRV Debug, OU=TRV, O=TRV, L=Local, S=Local, C=US"
+          "$BT/apksigner" sign --ks /tmp/debug.keystore \
+            --ks-pass:android --key-pass:android \
+            --out /tmp/trv-v0.1.apk /tmp/aligned.apk
+          "$BT/apksigner" verify --print-certs /tmp/trv-v0.1.apk | head -5
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: trv-v0.1-apk
+          path: /tmp/trv-v0.1.apk

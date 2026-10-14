@@ -1,0 +1,12 @@
+[package]
+name = "trv-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android NativeActivity shell for The Remote Viewer Network. Hand-rolled NDK FFI, zero external deps, no Google Play Services."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trv-ui = { path = "../ui" }
