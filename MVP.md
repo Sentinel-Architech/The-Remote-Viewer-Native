@@ -161,6 +161,24 @@ of them are code-quality problems — they're structural.
 **Revenue relevance:** scale — token economy and creator 80% payouts unlock
   here, but only if the audit path clears.
 
+## Go-to-market sequence
+
+*Approved 2026-10-13.* This is the order things launch in — what pulls people
+in, what keeps them, and what spins out later. Nothing here is sellable
+standalone today (no UI shell yet); this is the sequence for when the shell
+exists.
+
+- **Phase A — Draw:** The Sentinel (private, on-device, never phones home)
+  plus the unbiased, source-cited news feed launch first. These are the hooks
+  that pull users into The Remote Viewer Network.
+- **Phase B — Keep:** Creator economics become the retention loop — 80% to
+  exclusive creators, special badges, irreplaceable watermarks. If creators
+  can earn a living here, they stay, and they bring their audiences with
+  them. Creators are the growth engine.
+- **Phase C — Expand:** Standalone spin-outs later, only once the Network has
+  users — e.g., a standalone Sentinel app, a standalone news app. Launched
+  from a position of strength, not as a first bet.
+
 ## What maximizes the shot
 
 - **Ship Phase 1 small.** Every week spent polishing non-revenue features is a
