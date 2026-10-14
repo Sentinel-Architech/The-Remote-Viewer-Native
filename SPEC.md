@@ -48,6 +48,8 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - List of protections: to be defined (not found in GH yet — user to provide).
   - GH contains TWO simulation games that are also EDUCATIONAL FOR THE SENTINEL (to be ported to Native). These are to be the only simulation about this whole DApp.
   - Quality bar (decided 2026-10-13): both simulation games must be HIGH RESOLUTION, immersive, and relevant.
+  - Game 1 "God's Eye" (decided 2026-10-13): as relevant as homeland security sees cyber threats.
+  - Game 2 "Neural Mesh" (decided 2026-10-13; code name in GH: "neural-link"): matrix-themed through the brain, covering medical ailments to heal and protect the brain; all in-game education to be medically relevant to 2026. (Creative direction for the game, not a medical claim.)
   - The Sentinel is to have the ability to use ALL SENSORS AND COMPONENTS of the Remote Viewer device.
 
 ## 6. Identity & Email
