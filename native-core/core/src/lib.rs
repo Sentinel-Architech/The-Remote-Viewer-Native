@@ -1,4 +1,4 @@
-//! trv-core: 100% on-device native core for The Remote Viewer.
+//! trv-core: 100% on-device native core for The Remote Viewer Network.
 //!
 //! No network. No corporate dependencies. MIT/Apache-2.0 only.
 //! Stubs are API-stable; real crypto/QR/MoE weights land here later.

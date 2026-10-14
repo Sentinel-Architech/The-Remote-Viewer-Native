@@ -1,4 +1,4 @@
-# The Remote Viewer — Native: Monetization Implementation Plan
+# The Remote Viewer Network — Native: Monetization Implementation Plan
 *Drafted 2026-10-13. Local document only — not pushed to GitHub. No revenue is promised anywhere in this plan.*
 
 ## 1. Tier Subscriptions

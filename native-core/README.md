@@ -1,7 +1,7 @@
-# The Remote Viewer — Native Core Draft
+# The Remote Viewer Network — Native Core Draft
 
 Minimal, compilable Rust workspace draft for `The-Remote-Viewer-Native`:
-the 100% native, open-source rebuild of The Remote Viewer as a real DApp
+the 100% native, open-source rebuild of The Remote Viewer Network as a real DApp
 (instead of the skeleton left behind).
 
 ## Members

@@ -1,4 +1,4 @@
-# The Remote Viewer Native — 12-Month MVP Plan
+# The Remote Viewer Network Native — 12-Month MVP Plan
 *Drafted 2026-10-13. Local document only — not pushed to GitHub.*
 
 ## Why this plan exists

@@ -1,4 +1,4 @@
-# The Remote Viewer — Native SPEC
+# The Remote Viewer Network — Native SPEC
 **100% Native Stack, Open Source — Draft for Review**
 *Generated 2026-10-13 from user's spec. Not pushed to GH without approval.*
 
@@ -19,7 +19,7 @@
 - No corporate code. No known tech giants/entities. No Michigan Micro Mote line.
 - EVERYTHING HAPPENS ON DEVICE and NEVER over cell towers to transmit data — except Solana parts (see §10).
 - No outside services for NEWS, finances, medical records, or ANYTHING ELSE required by device. If it can be read or watched on a device, it's NATIVE.
-- Every aspect of The Remote Viewer to be FEDERALLY COMPLIANT, including HIPAA and ADA compliant system-wide, and encrypted per individual Remote Viewer.
+- Every aspect of The Remote Viewer Network to be FEDERALLY COMPLIANT, including HIPAA and ADA compliant system-wide, and encrypted per individual Remote Viewer.
 - User retains full ownership. No human may claim ownership because their AI helped create an aspect.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
@@ -41,7 +41,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 ## 5. Mixture of Experts + The Sentinel (EI)
 - On-device MoE to help each Remote Viewer learn/find on local device. No cloud.
 - Main repo reference: `grok/router` + 11 skills: cognitive-science, coordinator, declassified-ops, first-aid, mathematics, physics, political-science, quantum, remote-viewer, simple-comms, zk.
-- ONLY ONE EI in The Remote Viewer: **The Sentinel**.
+- ONLY ONE EI in The Remote Viewer Network: **The Sentinel**.
   - Siri/Google equivalent: user speaks to their Sentinel, it learns exclusively about them, on-device.
   - Searches GLOBAL NET for any/all requests as long as DECLASSIFIED — then not off limits (We The People, 1st Amendment, FOIA).
   - Research rule: only NOT researched if NOT PUBLIC AND NOT ABOUT ME.
