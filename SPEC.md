@@ -50,6 +50,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Quality bar (decided 2026-10-13): both simulation games must be HIGH RESOLUTION, immersive, and relevant.
   - Game 1 "God's Eye" (decided 2026-10-13): as relevant as homeland security sees cyber threats.
   - Game 2 "Neural Mesh" (decided 2026-10-13; code name in GH: "neural-link"): matrix-themed through the brain, covering medical ailments to heal and protect the brain; all in-game education to be medically relevant to 2026. (Creative direction for the game, not a medical claim.)
+  - Transitions (decided 2026-10-13): vortex animation for transitions into games, out of games, and between in-game events.
   - The Sentinel is to have the ability to use ALL SENSORS AND COMPONENTS of the Remote Viewer device.
 
 ## 6. Identity & Email
