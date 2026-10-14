@@ -9,6 +9,7 @@ pub mod badges;
 pub mod creator;
 pub mod entitlement;
 pub mod gates;
+pub mod history;
 pub mod paywall;
 pub mod profile;
 pub mod registration;

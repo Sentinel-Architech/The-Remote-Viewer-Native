@@ -173,7 +173,7 @@ pub struct ProfileVault {
 /// FAILS CLOSED rather than falling back to weak time/PID-based
 /// entropy. Predictable salts or nonces would weaken the vault's
 /// encryption, so refusing to save is safer than saving weakly.
-fn random_bytes(n: usize) -> Result<Vec<u8>, VaultError> {
+pub(crate) fn random_bytes(n: usize) -> Result<Vec<u8>, VaultError> {
     if let Ok(mut f) = File::open("/dev/urandom") {
         let mut out = vec![0u8; n];
         f.read_exact(&mut out)
@@ -401,7 +401,7 @@ fn commit_temp_file(tmp: &Path, target: &Path) -> Result<(), VaultError> {
 /// Write `bytes` to `target` atomically: stage to a temp file, fsync,
 /// rename over the target. On ANY failure the temp file is removed
 /// (best-effort) and the previous target — if any — is untouched.
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), VaultError> {
+pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), VaultError> {
     let tmp = stage_temp_file(target, bytes)?;
     let result = commit_temp_file(&tmp, target);
     if result.is_err() {
@@ -432,7 +432,7 @@ fn lock_path_for(target: &Path) -> PathBuf {
 /// lock file behind — it contains the holder's PID for diagnosis and
 /// must be removed by the operator. No PID-liveness probing is done:
 /// that is not portable in std-only code.
-struct VaultLock {
+pub(crate) struct VaultLock {
     lock_path: PathBuf,
     /// Held open for the lock's lifetime (conventional; exclusivity
     /// was established at creation).
@@ -440,7 +440,7 @@ struct VaultLock {
 }
 
 impl VaultLock {
-    fn acquire(target: &Path) -> Result<Self, VaultError> {
+    pub(crate) fn acquire(target: &Path) -> Result<Self, VaultError> {
         let lock_path = lock_path_for(target);
         let mut handle = OpenOptions::new()
             .write(true)
