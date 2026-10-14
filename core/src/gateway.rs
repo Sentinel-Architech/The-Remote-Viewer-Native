@@ -255,6 +255,10 @@ impl GuidedSession {
     }
 
     /// Build a custom session from a chosen step list.
+    ///
+    /// Deliberate edge case: a custom session with **no steps** is
+    /// trivially complete — [`GuidedSession::progress`] reports `1.0`
+    /// and [`GuidedSession::is_complete`] is `true` from the start.
     pub fn custom(steps: Vec<SessionStep>) -> Self {
         GuidedSession {
             steps,
@@ -312,6 +316,10 @@ impl GuidedSession {
     }
 
     /// Progress as a fraction 0.0–1.0.
+    ///
+    /// An empty session (see [`GuidedSession::custom`]) reports `1.0`:
+    /// with no steps, there is nothing left to do — trivially
+    /// complete.
     pub fn progress(&self) -> f64 {
         if self.steps.is_empty() {
             return 1.0;

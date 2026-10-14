@@ -82,6 +82,16 @@ mod tests {
     }
 
     #[test]
+    fn owner_returns_the_bound_handle_directly() {
+        let sentinel = Sentinel::new("test-viewer");
+        assert_eq!(sentinel.owner(), "test-viewer");
+        // Binding is per-instance: a second Sentinel keeps its own owner.
+        let other = Sentinel::new("other-viewer");
+        assert_eq!(other.owner(), "other-viewer");
+        assert_ne!(sentinel.owner(), other.owner());
+    }
+
+    #[test]
     fn may_research_allows_public_or_owner_topics() {
         assert!(Sentinel::may_research(true, true));
         assert!(Sentinel::may_research(true, false));

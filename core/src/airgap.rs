@@ -95,6 +95,9 @@ impl TrvlFrame {
     ///
     /// Rejects wrong magic, malformed hex, and CRC mismatches
     /// (corrupted optical reads). Pure local computation.
+    ///
+    /// Hex case: decode accepts upper- and lowercase hex digits;
+    /// [`TrvlFrame::encode`] always emits lowercase.
     pub fn decode(text: &str) -> Result<Self, &'static str> {
         let hex = text.strip_prefix(&format!("{}.", TRVL_MAGIC)).ok_or("bad magic")?;
         if hex.len() % 2 != 0 {

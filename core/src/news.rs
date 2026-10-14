@@ -105,8 +105,36 @@ impl NewsItem {
     }
 }
 
+/// Maximum items held by [`FeedCache`]. Pushes beyond the cap evict
+/// the oldest items (insertion order) so the cache cannot grow
+/// without bound on-device.
+pub const MAX_CACHED_ITEMS: usize = 1000;
+
+/// Errors for news cache operations. All local; no I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewsError {
+    /// The item is not fully cited (see [`NewsItem::is_cited`]).
+    Uncited,
+    /// The source's homepage URL is missing or uses an unsupported
+    /// scheme — only `http://` and `https://` are accepted on insert.
+    InvalidSourceUrl,
+}
+
+impl NewsError {
+    /// Short machine-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            NewsError::Uncited => "uncited",
+            NewsError::InvalidSourceUrl => "invalid-source-url",
+        }
+    }
+}
+
 /// On-device cache of news items. Newest-first ordering is the
 /// caller's concern; the cache stores what it is given.
+///
+/// The cache is capped at [`MAX_CACHED_ITEMS`] items: pushing beyond
+/// the cap evicts the oldest items first.
 #[derive(Debug, Default)]
 pub struct FeedCache {
     items: Vec<NewsItem>,
@@ -118,19 +146,33 @@ impl FeedCache {
         FeedCache { items: Vec::new() }
     }
 
-    /// Add an item. Items that are not fully cited are rejected and
-    /// `false` is returned; cited items return `true`.
-    pub fn add(&mut self, item: NewsItem) -> bool {
+    /// Add an item. Returns [`NewsError::Uncited`] for items that are
+    /// not fully cited, and [`NewsError::InvalidSourceUrl`] when the
+    /// source's homepage URL is missing or does not start with
+    /// `http://` or `https://`.
+    ///
+    /// On success the item is stored (replacing any existing item
+    /// with the same id), and pushes beyond [`MAX_CACHED_ITEMS`]
+    /// evict the oldest items first.
+    pub fn add(&mut self, item: NewsItem) -> Result<(), NewsError> {
         if !item.is_cited() {
-            return false;
+            return Err(NewsError::Uncited);
+        }
+        let url = item.source.homepage_url.as_str();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(NewsError::InvalidSourceUrl);
         }
         // Replace any existing item with the same id (dedupe on refresh).
         if let Some(pos) = self.items.iter().position(|i| i.id == item.id) {
             self.items[pos] = item;
         } else {
             self.items.push(item);
+            // Cap the cache: evict oldest first.
+            while self.items.len() > MAX_CACHED_ITEMS {
+                self.items.remove(0);
+            }
         }
-        true
+        Ok(())
     }
 
     /// All cached items, in insertion order.
@@ -246,7 +288,7 @@ mod tests {
         let bad_source = NewsSource::new("", "", None, None);
         let bad = NewsItem::new("x", "H", "S", bad_source, "", 1, &[]);
         assert!(!bad.is_cited());
-        assert!(!cache.add(bad));
+        assert_eq!(cache.add(bad), Err(NewsError::Uncited));
         assert!(cache.is_empty());
     }
 
@@ -264,8 +306,8 @@ mod tests {
     #[test]
     fn cache_prune_removes_old_items() {
         let mut cache = FeedCache::new();
-        assert!(cache.add(example_item("old", 100)));
-        assert!(cache.add(example_item("new", 1_700_000_000)));
+        cache.add(example_item("old", 100)).expect("cited item with valid URL inserts");
+        cache.add(example_item("new", 1_700_000_000)).expect("cited item with valid URL inserts");
         let removed = cache.prune_older_than(1_700_000_000, 3_600);
         assert_eq!(removed, 1);
         assert_eq!(cache.len(), 1);
@@ -275,8 +317,8 @@ mod tests {
     #[test]
     fn cache_add_dedupes_by_id() {
         let mut cache = FeedCache::new();
-        assert!(cache.add(example_item("a", 100)));
-        assert!(cache.add(example_item("a", 200)));
+        cache.add(example_item("a", 100)).expect("cited item with valid URL inserts");
+        cache.add(example_item("a", 200)).expect("cited item with valid URL inserts");
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.items()[0].published_unix_secs, 200);
     }
@@ -284,8 +326,8 @@ mod tests {
     #[test]
     fn distinct_sources_cited() {
         let mut cache = FeedCache::new();
-        assert!(cache.add(example_item("1", 1)));
-        assert!(cache.add(example_item("2", 2)));
+        cache.add(example_item("1", 1)).expect("cited item with valid URL inserts");
+        cache.add(example_item("2", 2)).expect("cited item with valid URL inserts");
         let other = NewsSource::new("Other Press", "https://other.example", None, None);
         let item3 = NewsItem::new(
             "3",
@@ -296,7 +338,7 @@ mod tests {
             3,
             &["policy"],
         );
-        assert!(cache.add(item3));
+        cache.add(item3).expect("cited item with valid URL inserts");
         let sources = cache.sources_cited();
         assert_eq!(sources.len(), 2);
     }
@@ -318,5 +360,52 @@ mod tests {
             cache_on_device: true,
         };
         assert!(!p.is_compliant());
+    }
+
+    #[test]
+    fn homepage_url_must_use_http_or_https_scheme() {
+        let mut cache = FeedCache::new();
+        assert_eq!(MAX_CACHED_ITEMS, 1000);
+        // Missing scheme...
+        let noscheme = NewsSource::new("No Scheme", "example.com", None, None);
+        let item = NewsItem::new("u1", "H", "S", noscheme, "https://example.com/a", 1, &[]);
+        assert_eq!(cache.add(item), Err(NewsError::InvalidSourceUrl));
+        // Unsupported scheme...
+        let ftp = NewsSource::new("FTP Press", "ftp://example.com", None, None);
+        let item = NewsItem::new("u2", "H", "S", ftp, "ftp://example.com/a", 1, &[]);
+        assert_eq!(cache.add(item), Err(NewsError::InvalidSourceUrl));
+        // ...while http:// and https:// are accepted.
+        for url in ["http://example.com", "https://example.com"] {
+            let src = NewsSource::new("OK Press", url, None, None);
+            let item = NewsItem::new(url, "H", "S", src, url, 1, &[]);
+            cache.add(item).expect("http(s) URL inserts");
+        }
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.is_empty());
+        assert_eq!(NewsError::Uncited.label(), "uncited");
+        assert_eq!(NewsError::InvalidSourceUrl.label(), "invalid-source-url");
+    }
+
+    #[test]
+    fn cache_evicts_oldest_items_beyond_max_cached_items() {
+        let mut cache = FeedCache::new();
+        // Push past the cap.
+        for i in 0..(MAX_CACHED_ITEMS + 50) {
+            cache
+                .add(example_item(&format!("item-{i}"), i as u64))
+                .expect("insert under cap");
+        }
+        assert_eq!(cache.len(), MAX_CACHED_ITEMS);
+        // The 50 oldest were evicted; the newest survive.
+        assert_eq!(cache.items()[0].id, "item-50");
+        assert_eq!(
+            cache.items()[MAX_CACHED_ITEMS - 1].id,
+            format!("item-{}", MAX_CACHED_ITEMS + 49)
+        );
+        // Refreshing an existing id does not grow the cache.
+        cache
+            .add(example_item("item-50", 999_999))
+            .expect("dedupe refresh");
+        assert_eq!(cache.len(), MAX_CACHED_ITEMS);
     }
 }

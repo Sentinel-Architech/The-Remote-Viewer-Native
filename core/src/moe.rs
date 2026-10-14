@@ -60,9 +60,16 @@ impl ExpertSkill {
 /// experts match, the one with the most keyword hits wins; ties break
 /// to whichever appears earlier in this list. Most specific domains
 /// come first so ambiguous input resolves deterministically.
+///
+/// Matching rule (see [`keyword_matches`]): a keyword that is a single
+/// alphanumeric word must appear as a *whole word* in the input
+/// (words are split on non-alphanumeric boundaries), so short tokens
+/// like `zk` no longer fire inside longer words like "waterproof".
+/// Keywords containing separators (spaces, hyphens, dots) keep
+/// substring matching — the separators already make them specific.
 const ROUTING_TABLE: &[(ExpertSkill, &[&str])] = &[
     (ExpertSkill::Zk, &[
-        "zero-knowledge", "zero knowledge", "zk-", "zk.", "zk ", "zk",
+        "zero-knowledge", "zero knowledge", "zk",
         "zk-snark", "snark", "zk-stark", "stark", "proof", "verify",
         "cryptography", "cryptographic", "encrypt", "commitment",
     ]),
@@ -116,9 +123,38 @@ const ROUTING_TABLE: &[(ExpertSkill, &[&str])] = &[
     ]),
 ];
 
-/// Route free-text input to the best local expert using
-/// case-insensitive keyword substring matching.
+/// True when `word` appears in `haystack` as a whole word.
 ///
+/// `haystack` is split on non-alphanumeric boundaries, so a short
+/// token like `zk` matches "zk-snark" (words: "zk", "snark") but not
+/// "waterproof". No case folding here — callers lowercase first.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    haystack
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == word)
+}
+
+/// True when the keyword `kw` matches the (already lowercased) input.
+///
+/// Single-word keywords — one run of ASCII alphanumerics — must match
+/// a whole word (see [`contains_word`]); this is what keeps short
+/// tokens like `zk` from firing inside longer words. Keywords that
+/// contain separators (spaces, hyphens, dots) keep plain substring
+/// matching, since the separators already make them specific enough.
+fn keyword_matches(lowered: &str, kw: &str) -> bool {
+    if kw.chars().all(|c| c.is_ascii_alphanumeric()) {
+        contains_word(lowered, kw)
+    } else {
+        lowered.contains(kw)
+    }
+}
+
+/// Route free-text input to the best local expert using
+/// case-insensitive keyword matching.
+///
+/// * A single-word keyword matches only whole words, so short tokens
+///   (e.g. `zk`) never fire inside longer words (e.g. "waterproof").
+/// * Multi-token keywords (spaces, hyphens, dots) match substrings.
 /// * The expert with the most keyword hits wins.
 /// * Ties break to the most specific domain first (priority order in
 ///   [`ROUTING_TABLE`]).
@@ -133,7 +169,7 @@ pub fn route(input: &str) -> ExpertSkill {
     for &(skill, keywords) in ROUTING_TABLE {
         let mut hits = 0usize;
         for &kw in keywords {
-            if lowered.contains(kw) {
+            if keyword_matches(&lowered, kw) {
                 hits += 1;
             }
         }
@@ -289,8 +325,19 @@ mod tests {
     }
 
     #[test]
-    fn router_struct_delegates_to_free_function() {
-        let router = MoeRouter::new();
+    fn waterproof_does_not_route_to_zk() {
+        // Regression: the old bare-substring "zk" fired inside
+        // "waterproof" (and "proof" did too). Word-aware matching
+        // keeps the jacket out of the cryptography expert.
+        assert_routes("is this jacket waterproof enough for rain?", ExpertSkill::Coordinator);
+        assert_routes("waterproof boots for the trail", ExpertSkill::Coordinator);
+        // The standalone token still routes to zk.
+        assert_routes("explain zk proofs in simple terms", ExpertSkill::Zk);
+        assert_routes("what is a zk-SNARK?", ExpertSkill::Zk);
+    }
+
+    #[test]
+    fn router_struct_delegates_to_free_function() {        let router = MoeRouter::new();
         assert_eq!(router.route("bleeding wound first aid"), ExpertSkill::FirstAid);
         assert_eq!(router.route(""), ExpertSkill::Coordinator);
     }
