@@ -111,6 +111,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - HYDRA PROTOCOL // SENTINEL OS: safety reporting for serious harms.
 - Censored outbound packet; original seal stays on-device in local M-o-E; per-region emergency numbers.
 - Reference: `apps/hub/src/lib/trv/hydra.ts` in main repo.
+- Exploitation response (decided 2026-10-13): if a pedophile attempts to exploit, the attempt is immediately geo-located and sent to authorities.
 
 ## 12. Token Pool (from GH TOKENOMICS, to confirm)
 - Digital / NFT primary: 80% creator, 10% pool, 10% platform (per TOKENOMICS.md).
