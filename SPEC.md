@@ -93,6 +93,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `trv_governance` in GH is scaffold/Track A, not proven, CI blocked, not audited, not mainnet. Proven path today is USDC+memo via `digital-vending/`.
 - AR: like Pokemon Go for adults, NO cartoon animation. TRV tokens geolocated and earned into TRV-native crypto wallets, exclusive to TRV.
 - **AR earnings** (decided 2026-10-13): TRV tokens gathered through AR are credited to the viewer's TRV wallet, spendable on profile customization and other Network purchases.
+- **AR anti-cashout** (decided 2026-10-13): AR-earned TRV becomes dust if moved to an outside wallet. AR tokens are spendable in-Network only (customization, purchases) — they cannot be cashed out.
 - No TRV tokens transferred to other platforms WITHOUT a transfer fee to TRV. (Transfer-fee amount: **25% to TRV — decided 2026-10-13.** The 50 bps placeholder in `core/src/wallet.rs` is being replaced with the decided 25%. TRV token intended as Solana blockchain crypto.)
 - Each Remote Viewer gets their own digital wallet exclusive to TRV to add money or buy through TRV ecosystem.
 - **Self-custody** (decided 2026-10-13): each Remote Viewer is 100% in charge of their own crypto wallet, which is exclusively TRV — TRV never takes custody.
