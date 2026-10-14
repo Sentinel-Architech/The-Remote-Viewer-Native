@@ -26,6 +26,10 @@
 //!   external-spend fee waived while the lock is active.
 //! * [`referral`] — $5 in TRV per friend who registers via QR and
 //!   pays for verification; claimable within 14 days, then expired.
+//! * [`anti_dump`] — pump-and-dump prohibition: transfer velocity
+//!   limits, 72h cooldowns on large transfers, a 15% flip penalty
+//!   on rapid buy-then-sell (to the community pool), transparent
+//!   whale-watch flagging, and early-unstake review flags.
 //!
 //! # Policy sources
 //!
@@ -42,6 +46,7 @@
 //! * [`transfer_hook::TREASURY_PLACEHOLDER`] — treasury pubkey.
 //! * [`program::PROGRAM_ID`] — program address.
 
+pub mod anti_dump;
 pub mod math;
 pub mod program;
 pub mod referral;
@@ -50,6 +55,13 @@ pub mod token;
 pub mod transfer_hook;
 pub mod identity;
 
+pub use anti_dump::{
+    AntiDumpError, CooldownState, EarlyUnstakeFlag, FlipTracker, GuardState, GuardedTransferReceipt,
+    VelocityTracker, WhaleFlag, COMMUNITY_POOL_PLACEHOLDER, COOLDOWN_SECS, FLIP_PENALTY_BPS,
+    FLIP_WINDOW_SECS, LARGE_TRANSFER_BPS_OF_SUPPLY, VELOCITY_MAX_BPS_OF_BALANCE,
+    VELOCITY_MAX_BPS_OF_BALANCE_STAKED, VELOCITY_WINDOW_SECS, WHALE_DUMP_BPS_OF_HOLDINGS,
+    WHALE_HOLDING_BPS_OF_SUPPLY,
+};
 pub use math::MathError;
 pub use program::{Instruction, ProgramError};
 pub use referral::{
