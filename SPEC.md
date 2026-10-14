@@ -59,6 +59,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Format: `Username@RV.com`.
 - At registration they must select either Male or Female, NOTHING ELSE EVER.
 - Background ID verification via state/fed ID to prove human (for unlimited tiers). NO PEDOPHILES ALLOWED.
+- ID verification purpose (decided 2026-10-13): state and federal approval ID verification is to aid in preventing the exploitation of minors.
 - If Remote Viewer doesn't own a State ID then VERIFICATION is ineligible.
 
 ## 7. Communication & Sharing
