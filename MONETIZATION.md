@@ -49,6 +49,7 @@
 ## 3. Creator Economics
 
 - **80% to exclusive creators**: Remote Viewers who create exclusively for TRV keep 80% of what they sell. (Recorded as policy; no sales pipeline implemented.)
+- **Creator paywalls** (confirmed 2026-10-13): creators can paywall their own content. Revenue split: **80% to creator, 20% to TRV**.
 - **Watermarks**: creators get watermarks that cannot be replaced. (Policy only; no implementation.)
 - **Live customization**: Myspace-style account customization with music, but ENHANCED — creator profiles drive this. (Not implemented.)
 

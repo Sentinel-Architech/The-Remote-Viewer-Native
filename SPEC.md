@@ -67,6 +67,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - NFC: allow anything to be shared via NFC, but ONLY if actually following each other on the Network.
 - Customization: live account customization like Myspace (music etc.), but ENHANCED.
 - Creators get watermarks that can't be replaced. Remote Viewers who want to earn a living creating exclusively for TRV get 80% of what they sell.
+- Creator paywalls (confirmed 2026-10-13): creators can paywall their own content. Revenue split: 80% to creator, 20% to TRV.
 
 ## 8. Subscriptions, Tiers, Founding Members
 - Tiers (decided 2026-10-13): Tier 1 — $10/month or $100/year; Tier 2 — $25/month or $150/year; Tier 3 — $45/month or $200/year.
