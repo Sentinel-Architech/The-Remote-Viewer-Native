@@ -58,6 +58,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Sentinel compute scaling (decided 2026-10-13): The Sentinel (Enhanced Intelligence) goes above and beyond if the Remote Viewer has the compute power — adaptive to device capability.
   - Sentinel education (decided 2026-10-13): The Sentinel should have the knowledge of every Ivy League college and university, so no human goes without proper education.
   - Free test materials (decided 2026-10-13): all testing materials are to be widely available for free at the highest tier, with The Sentinel to tutor.
+  - Sentinel life tutor (decided 2026-10-13): The Sentinel is to be a tutor for all aspects required to thrive in America.
 
 ## 6. Identity & Email
 - Login via traditional email to verify they are real.
