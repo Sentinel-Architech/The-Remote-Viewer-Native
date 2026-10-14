@@ -12,6 +12,13 @@
 //! external crate, intentionally not implemented here) before any
 //! production use, key exchange, or anything adversarial.
 
+/// Pure-Rust Ed25519 (RFC 8032), std-only.
+///
+/// NOT externally audited — see the module docs. Used for activation
+/// codes (issuer signatures). The older [`Keypair`] stub above remains
+/// for device identity and is unchanged by this module.
+pub mod ed25519;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 32-byte secret key. Never serialized off-device.

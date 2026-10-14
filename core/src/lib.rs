@@ -3,6 +3,7 @@
 //! No network. No corporate dependencies. MIT/Apache-2.0 only.
 //! Stubs are API-stable; real crypto/QR/MoE weights land here later.
 
+pub mod activation;
 pub mod airgap;
 pub mod crypto;
 pub mod gateway;
