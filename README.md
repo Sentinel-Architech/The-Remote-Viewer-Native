@@ -33,5 +33,6 @@ Built by **Sentinel-Architech** — *Architech*, a mix of Architecture and Techn
 
 - 𝕏 [@TRV_Architech](https://x.com/TRV_Architech)
 - GitHub: `Sentinel-Architech/The-Remote-Viewer-Native`
+- Follow progress: every change lands here as a commit.
 
 ⭐ **Star the repo. Watch what happens next.**
