@@ -335,6 +335,40 @@ impl AttestationRecord {
         out[131..135].copy_from_slice(&self.window_count.to_be_bytes());
         out
     }
+
+    /// Inverse of [`AttestationRecord::to_bytes`]. The on-chain adapter
+    /// uses this to deserialize the PDA account data before forwarding
+    /// to the pure instruction handlers. Pure function, no I/O.
+    pub fn from_bytes(raw: &[u8; 135]) -> Self {
+        let mut device_key = [0u8; 32];
+        let mut attestation_hash = [0u8; 64];
+        device_key.copy_from_slice(&raw[0..32]);
+        attestation_hash.copy_from_slice(&raw[32..96]);
+        let mut b8 = [0u8; 8];
+        let mut b4 = [0u8; 4];
+        b8.copy_from_slice(&raw[97..105]);
+        let registered_at = u64::from_be_bytes(b8);
+        b8.copy_from_slice(&raw[105..113]);
+        let expires_at = u64::from_be_bytes(b8);
+        b8.copy_from_slice(&raw[114..122]);
+        let revoked_at = u64::from_be_bytes(b8);
+        b8.copy_from_slice(&raw[123..131]);
+        let window_start = u64::from_be_bytes(b8);
+        b4.copy_from_slice(&raw[131..135]);
+        let window_count = u32::from_be_bytes(b4);
+        AttestationRecord {
+            device_key,
+            attestation_hash,
+            level: raw[96],
+            registered_at,
+            expires_at,
+            revoked: raw[113] != 0,
+            revoked_at,
+            initialized: raw[122] != 0,
+            window_start,
+            window_count,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -957,7 +991,6 @@ mod tests {
 
     #[test]
     fn invalid_level_rejected() {
-        let mut record = AttestationRecord::uninitialized();
         let dk = device_key(7);
         // Level 0 (Unverified) must never anchor.
         let att = fake_attestation(device_key(9), 0, 1_000, 1_000 + 365 * 86400, dk);
@@ -1224,5 +1257,48 @@ mod tests {
             }
             _ => panic!("wrong instruction"),
         }
+    }
+}
+
+#[cfg(test)]
+mod deploy_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn record_bytes_round_trip() {
+        let mut record = AttestationRecord::uninitialized();
+        register_attestation(
+            &mut record,
+            [7u8; 32],
+            [9u8; 64],
+            2,
+            2_000_000_000,
+            1_700_000_000,
+        )
+        .unwrap();
+        let bytes = record.to_bytes();
+        let back = AttestationRecord::from_bytes(&bytes);
+        assert_eq!(back.device_key, [7u8; 32]);
+        assert_eq!(back.attestation_hash, [9u8; 64]);
+        assert_eq!(back.level, 2);
+        assert_eq!(back.registered_at, 1_700_000_000);
+        assert_eq!(back.expires_at, 2_000_000_000);
+        assert!(!back.revoked);
+        assert_eq!(back.revoked_at, 0);
+        assert!(back.initialized);
+        assert_eq!(back.window_start, 1_700_000_000);
+        assert_eq!(back.window_count, 1);
+    }
+
+    #[test]
+    fn record_bytes_round_trip_revoked() {
+        let mut record = AttestationRecord::uninitialized();
+        register_attestation(&mut record, [3u8; 32], [5u8; 64], 1, 2_000_000_000, 1_700_000_000)
+            .unwrap();
+        revoke_attestation(&mut record, [3u8; 32], 1_700_000_100).unwrap();
+        let back = AttestationRecord::from_bytes(&record.to_bytes());
+        assert!(back.revoked);
+        assert_eq!(back.revoked_at, 1_700_000_100);
+        assert!(back.initialized);
     }
 }

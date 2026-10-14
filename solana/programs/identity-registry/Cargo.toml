@@ -1,0 +1,16 @@
+[package]
+name = "trv-identity-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Deployable Solana adapter for the TRV VerificationRegistry. Thin on-chain wrapper: deserializes accounts and instruction data, then forwards to the pure-Rust logic in trv-solana (which stays std-only and fully offline-testable)."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "trv_identity_registry"
+
+[dependencies]
+trv-solana = { path = "../.." }
+solana-program = "=4.1.0"
+
+# Standalone deploy crate: not a member of the parent solana workspace.
+[workspace]
