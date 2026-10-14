@@ -17,26 +17,49 @@
 //!   up to [`token::TRV_TOTAL_SUPPLY`] and then the supply is
 //!   permanently locked; no inflation is possible afterwards.
 //! * [`transfer_hook`] — transfer hook enforcing the 25% TRV fee on
-//!   moves to outside wallets, and the AR soulbound "dust" rule.
+//!   moves to outside wallets, the separate 20% outside-Network
+//!   spending fee, the staker fee waiver, and the AR soulbound
+//!   "dust" rule.
 //! * [`staking`] — 90-day locked staking. Free to enter regardless
-//!   of amount, no early unstake, proportional rewards, and the 20%
-//!   external-spend fee is waived while staked.
+//!   of amount, no early unstake, proportional rewards at a
+//!   placeholder 5% APY, and both the 25% transfer fee and the 20%
+//!   external-spend fee waived while the lock is active.
+//! * [`referral`] — $5 in TRV per friend who registers via QR and
+//!   pays for verification; claimable within 14 days, then expired.
 //!
 //! # Policy sources
 //!
 //! All fee and lock parameters below are user decisions recorded in
-//! the workspace spec (2026-10-13). They are constants here so a
-//! future governance vote can only change them via a program
-//! upgrade, never silently.
+//! the workspace spec (2026-10-13, economics 2026-10-14). They are
+//! constants here so a future governance vote can only change them
+//! via a program upgrade, never silently.
+//!
+//! # Placeholders (not final — set before mainnet)
+//!
+//! * [`staking::REWARD_APY_BPS_PLACEHOLDER`] — 5% APY reward rate.
+//! * [`referral::TRV_USD_CENTS_PLACEHOLDER`] — $1/TRV price for the
+//!   $5 referral reward.
+//! * [`transfer_hook::TREASURY_PLACEHOLDER`] — treasury pubkey.
+//! * [`program::PROGRAM_ID`] — program address.
 
 pub mod math;
 pub mod program;
+pub mod referral;
 pub mod staking;
 pub mod token;
 pub mod transfer_hook;
 
 pub use math::MathError;
 pub use program::{Instruction, ProgramError};
-pub use staking::{StakeAccount, StakingError, STAKE_LOCK_SECS};
+pub use referral::{
+    ReferralError, ReferralLedger, ReferralRecord, REFERRAL_CLAIM_WINDOW_SECS,
+    REFERRAL_REWARD_BASE_UNITS,
+};
+pub use staking::{
+    StakeAccount, StakingError, StakingPool, CLAIM_WINDOW_AFTER_UNSTAKE_SECS,
+    REWARD_APY_BPS_PLACEHOLDER, STAKE_LOCK_SECS,
+};
 pub use token::{MintState, MintError, TRV_DECIMALS, TRV_TOTAL_SUPPLY};
-pub use transfer_hook::{TransferHookError, TransferReceipt, TRANSFER_FEE_BPS};
+pub use transfer_hook::{
+    TransferHookError, TransferReceipt, TRANSFER_FEE_BPS, SPEND_FEE_BPS,
+};

@@ -12,13 +12,16 @@
 //! |-----------------------------|--------------------------------------------------------|
 //! | `#[program]` module         | [`process_instruction`]                                |
 //! | `#[derive(Accounts)]`       | [`Accounts`] — explicit account bundle                 |
-//! | `#[account]` structs        | [`MintAccount`], [`StakeAccountRecord`], [`TreasuryRecord`] |
+//! | `#[account]` structs        | [`MintAccount`], [`StakeAccountRecord`],               |
+//! |                             | [`StakingPoolRecord`], [`ReferralLedgerRecord`],       |
+//! |                             | [`TreasuryRecord`]                                     |
 //! | `declare_id!`               | [`PROGRAM_ID`] (placeholder — replaced at deploy)      |
 //! | `Clock::get()`              | `now` parameter (unix seconds; injected, never read here) |
 //! | `Signer` checks             | `is_signer` flags on [`Accounts`]                      |
 
 use crate::math::MathError;
-use crate::staking::{self, StakeAccount, StakingError};
+use crate::referral::{ReferralError, ReferralLedger};
+use crate::staking::{self, StakeAccount, StakingError, StakingPool};
 use crate::token::{MintError, MintState};
 use crate::transfer_hook::{self, TransferHookError, TransferReceipt, TransferRequest};
 use core::fmt;
@@ -36,14 +39,27 @@ pub enum Instruction {
     MintTo { caller: [u8; 32], amount: u64 },
     /// Permanently lock the mint. Args: caller pubkey.
     LockSupply { caller: [u8; 32] },
-    /// Transfer with the hook applied. See [`TransferRequest`].
-    TransferWithHook(TransferRequest),
+    /// Transfer with the hook applied (25% outside-wallet fee,
+    /// staker waiver, AR soulbound rule). See [`TransferRequest`].
+    /// The fee is routed to the treasury account.
+    Transfer(TransferRequest),
     /// Open a 90-day stake. Args: owner, amount, now.
     Stake { owner: [u8; 32], amount: u64, now: u64 },
-    /// Close a stake after the lock expires. Args: caller, now.
+    /// Close a stake after the lock expires. Returns the principal;
+    /// accrued rewards stay claimable for 30 days. Args: caller, now.
     Unstake { caller: [u8; 32], now: u64 },
     /// Claim rewards without unstaking. Args: caller, now.
     ClaimRewards { caller: [u8; 32], now: u64 },
+    /// Record a friend's QR signup as a pending referral.
+    /// Args: referrer pubkey, unique QR id, now.
+    RecordReferral { referrer: [u8; 32], qr_id: [u8; 32], now: u64 },
+    /// Attest the friend paid for verification, making the $5
+    /// reward eligible. The caller MUST have verified the payment.
+    /// Args: QR id, now.
+    MarkVerified { qr_id: [u8; 32], now: u64 },
+    /// Pay out all claimable referral rewards for the referrer.
+    /// Args: referrer pubkey, now.
+    ClaimReferral { referrer: [u8; 32], now: u64 },
 }
 
 /// On-chain mint account (Anchor `#[account]` equivalent).
@@ -56,6 +72,18 @@ pub struct MintAccount {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StakeAccountRecord {
     pub stake: StakeAccount,
+}
+
+/// Global staking pool (Anchor `#[account]` equivalent, singleton).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StakingPoolRecord {
+    pub pool: StakingPool,
+}
+
+/// Referral ledger (Anchor `#[account]` equivalent, singleton).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralLedgerRecord {
+    pub ledger: ReferralLedger,
 }
 
 /// Treasury account holding collected transfer fees.
@@ -72,6 +100,8 @@ pub struct TreasuryRecord {
 pub struct Accounts<'a> {
     pub mint: Option<&'a mut MintAccount>,
     pub stake: Option<&'a mut StakeAccountRecord>,
+    pub pool: Option<&'a mut StakingPoolRecord>,
+    pub referrals: Option<&'a mut ReferralLedgerRecord>,
     pub treasury: Option<&'a mut TreasuryRecord>,
     pub is_signer: bool,
 }
@@ -83,8 +113,11 @@ pub enum InstructionOutput {
     SupplyLocked,
     Transfer(TransferReceipt),
     Staked { locked_until: u64 },
-    Unstaked { principal: u64, rewards: u64 },
+    Unstaked { principal: u64 },
     RewardsClaimed { payout: u64 },
+    ReferralRecorded,
+    ReferralVerified,
+    ReferralClaimed { payout: u64 },
 }
 
 /// Program-level errors.
@@ -93,6 +126,7 @@ pub enum ProgramError {
     Token(MintError),
     Hook(TransferHookError),
     Staking(StakingError),
+    Referral(ReferralError),
     /// Checked arithmetic failed (e.g. treasury balance overflow).
     Math(MathError),
     /// Required account was not provided.
@@ -107,6 +141,7 @@ impl fmt::Display for ProgramError {
             ProgramError::Token(e) => write!(f, "token: {e}"),
             ProgramError::Hook(e) => write!(f, "transfer hook: {e}"),
             ProgramError::Staking(e) => write!(f, "staking: {e}"),
+            ProgramError::Referral(e) => write!(f, "referral: {e}"),
             ProgramError::Math(e) => write!(f, "math: {e}"),
             ProgramError::MissingAccount(name) => write!(f, "missing account: {name}"),
             ProgramError::MissingSignature => write!(f, "instruction requires a signer"),
@@ -145,7 +180,7 @@ pub fn process_instruction(
             mint.state.lock_supply(&caller).map_err(ProgramError::Token)?;
             Ok(InstructionOutput::SupplyLocked)
         }
-        Instruction::TransferWithHook(req) => {
+        Instruction::Transfer(req) => {
             let receipt =
                 transfer_hook::execute_transfer(req).map_err(ProgramError::Hook)?;
             if receipt.fee > 0 {
@@ -163,24 +198,81 @@ pub fn process_instruction(
         Instruction::Stake { owner, amount, now } => {
             require_signer(accts)?;
             let record = accts.stake.as_mut().ok_or(ProgramError::MissingAccount("stake"))?;
-            let locked_until = record.stake.stake(owner, amount, now).map_err(ProgramError::Staking)?;
+            let pool = accts.pool.as_mut().ok_or(ProgramError::MissingAccount("pool"))?;
+            let locked_until = pool
+                .pool
+                .open_stake(&mut record.stake, owner, amount, now)
+                .map_err(ProgramError::Staking)?;
             Ok(InstructionOutput::Staked { locked_until })
         }
         Instruction::Unstake { caller, now } => {
             require_signer(accts)?;
             let record = accts.stake.as_mut().ok_or(ProgramError::MissingAccount("stake"))?;
-            let (principal, rewards) =
-                record.stake.unstake(&caller, now).map_err(ProgramError::Staking)?;
-            Ok(InstructionOutput::Unstaked { principal, rewards })
+            let pool = accts.pool.as_mut().ok_or(ProgramError::MissingAccount("pool"))?;
+            let principal = pool
+                .pool
+                .close_stake(&mut record.stake, &caller, now)
+                .map_err(ProgramError::Staking)?;
+            Ok(InstructionOutput::Unstaked { principal })
         }
         Instruction::ClaimRewards { caller, now } => {
             require_signer(accts)?;
             let record = accts.stake.as_mut().ok_or(ProgramError::MissingAccount("stake"))?;
-            let payout = record
-                .stake
-                .claim_rewards(&caller, now)
+            let pool = accts.pool.as_mut().ok_or(ProgramError::MissingAccount("pool"))?;
+            let payout = pool
+                .pool
+                .claim(&mut record.stake, &caller, now)
                 .map_err(ProgramError::Staking)?;
             Ok(InstructionOutput::RewardsClaimed { payout })
+        }
+        Instruction::RecordReferral { referrer, qr_id, now } => {
+            require_signer(accts)?;
+            let record = accts
+                .referrals
+                .as_mut()
+                .ok_or(ProgramError::MissingAccount("referrals"))?;
+            record
+                .ledger
+                .record_referral(referrer, qr_id, now)
+                .map_err(ProgramError::Referral)?;
+            Ok(InstructionOutput::ReferralRecorded)
+        }
+        Instruction::MarkVerified { qr_id, now } => {
+            require_signer(accts)?;
+            let record = accts
+                .referrals
+                .as_mut()
+                .ok_or(ProgramError::MissingAccount("referrals"))?;
+            record
+                .ledger
+                .mark_verified(&qr_id, now)
+                .map_err(ProgramError::Referral)?;
+            Ok(InstructionOutput::ReferralVerified)
+        }
+        Instruction::ClaimReferral { referrer, now } => {
+            require_signer(accts)?;
+            let record = accts
+                .referrals
+                .as_mut()
+                .ok_or(ProgramError::MissingAccount("referrals"))?;
+            let payout = record
+                .ledger
+                .claim(&referrer, now)
+                .map_err(ProgramError::Referral)?;
+            // Referral payouts come from the treasury in the real
+            // program; the scaffold returns the payout amount for the
+            // adapter to disburse. Fail closed if the treasury could
+            // not cover it (checked here so the adapter never mints
+            // rewards out of thin air).
+            let treasury = accts
+                .treasury
+                .as_mut()
+                .ok_or(ProgramError::MissingAccount("treasury"))?;
+            treasury.balance = treasury
+                .balance
+                .checked_sub(payout)
+                .ok_or(ProgramError::Math(MathError::Overflow))?;
+            Ok(InstructionOutput::ReferralClaimed { payout })
         }
     }
 }
@@ -191,27 +283,65 @@ pub use staking::external_spend_fee_bps;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::referral::{ReferralError, REFERRAL_REWARD_BASE_UNITS};
+    use crate::staking::StakingPool;
     use crate::transfer_hook::WalletKind;
 
     fn accounts<'a>(
         mint: &'a mut MintAccount,
         stake: &'a mut StakeAccountRecord,
+        pool: &'a mut StakingPoolRecord,
+        referrals: &'a mut ReferralLedgerRecord,
         treasury: &'a mut TreasuryRecord,
     ) -> Accounts<'a> {
         Accounts {
             mint: Some(mint),
             stake: Some(stake),
+            pool: Some(pool),
+            referrals: Some(referrals),
             treasury: Some(treasury),
             is_signer: true,
         }
     }
 
+    fn setup() -> (
+        MintAccount,
+        StakeAccountRecord,
+        StakingPoolRecord,
+        ReferralLedgerRecord,
+        TreasuryRecord,
+    ) {
+        (
+            MintAccount {
+                state: MintState::initialize([1u8; 32]),
+            },
+            StakeAccountRecord {
+                stake: StakeAccount::empty(),
+            },
+            StakingPoolRecord {
+                pool: StakingPool::new(),
+            },
+            ReferralLedgerRecord {
+                ledger: ReferralLedger::new(),
+            },
+            TreasuryRecord { balance: 0 },
+        )
+    }
+
+    fn xfer_req(amount: u64, to: WalletKind, waiver: bool) -> TransferRequest {
+        TransferRequest {
+            amount,
+            from: WalletKind::Network,
+            to,
+            ar_earned: false,
+            sender_stake_waiver: waiver,
+        }
+    }
+
     #[test]
     fn full_mint_lifecycle() {
-        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
-        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
-        let mut treasury = TreasuryRecord { balance: 0 };
-        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
 
         let out = process_instruction(
             Instruction::MintTo { caller: [1u8; 32], amount: 500 },
@@ -231,10 +361,8 @@ mod tests {
 
     #[test]
     fn unsigned_mint_rejected() {
-        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
-        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
-        let mut treasury = TreasuryRecord { balance: 0 };
-        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
         accts.is_signer = false;
         let err = process_instruction(
             Instruction::MintTo { caller: [1u8; 32], amount: 1 },
@@ -246,18 +374,11 @@ mod tests {
 
     #[test]
     fn transfer_fee_lands_in_treasury() {
-        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
-        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
-        let mut treasury = TreasuryRecord { balance: 0 };
-        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
 
         let out = process_instruction(
-            Instruction::TransferWithHook(TransferRequest {
-                amount: 1_000,
-                from: WalletKind::Network,
-                to: WalletKind::Outside,
-                ar_earned: false,
-            }),
+            Instruction::Transfer(xfer_req(1_000, WalletKind::Outside, false)),
             &mut accts,
         )
         .unwrap();
@@ -271,19 +392,32 @@ mod tests {
     }
 
     #[test]
+    fn transfer_with_staker_waiver_pays_no_fee() {
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+
+        let out = process_instruction(
+            Instruction::Transfer(xfer_req(1_000, WalletKind::Outside, true)),
+            &mut accts,
+        )
+        .unwrap();
+        match out {
+            InstructionOutput::Transfer(r) => {
+                assert_eq!((r.fee, r.net), (0, 1_000));
+            }
+            _ => panic!("wrong output"),
+        }
+        assert_eq!(treasury.balance, 0, "waived fee leaves treasury untouched");
+    }
+
+    #[test]
     fn treasury_overflow_returns_error_not_panic() {
-        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
-        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
-        let mut treasury = TreasuryRecord { balance: u64::MAX };
-        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        treasury.balance = u64::MAX;
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
 
         let err = process_instruction(
-            Instruction::TransferWithHook(TransferRequest {
-                amount: 1_000,
-                from: WalletKind::Network,
-                to: WalletKind::Outside,
-                ar_earned: false,
-            }),
+            Instruction::Transfer(xfer_req(1_000, WalletKind::Outside, false)),
             &mut accts,
         )
         .unwrap_err();
@@ -294,10 +428,8 @@ mod tests {
 
     #[test]
     fn stake_unstake_roundtrip() {
-        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
-        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
-        let mut treasury = TreasuryRecord { balance: 0 };
-        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
 
         process_instruction(
             Instruction::Stake { owner: [2u8; 32], amount: 10_000, now: 0 },
@@ -311,25 +443,156 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ProgramError::Staking(StakingError::StillLocked { .. })));
 
+        // At expiry: principal back; rewards are NOT auto-paid —
+        // they wait for an explicit ClaimRewards.
         let out = process_instruction(
             Instruction::Unstake { caller: [2u8; 32], now: staking::STAKE_LOCK_SECS },
             &mut accts,
         )
         .unwrap();
-        assert_eq!(
-            out,
-            InstructionOutput::Unstaked { principal: 10_000, rewards: 500 }
-        );
+        assert_eq!(out, InstructionOutput::Unstaked { principal: 10_000 });
+
+        // Claim the leftover rewards (still within 30 days).
+        let out = process_instruction(
+            Instruction::ClaimRewards { caller: [2u8; 32], now: staking::STAKE_LOCK_SECS },
+            &mut accts,
+        )
+        .unwrap();
+        match out {
+            InstructionOutput::RewardsClaimed { payout } => assert!(payout > 0),
+            _ => panic!("wrong output"),
+        }
+    }
+
+    #[test]
+    fn stake_needs_pool_account() {
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+        accts.pool = None;
+        let err = process_instruction(
+            Instruction::Stake { owner: [2u8; 32], amount: 100, now: 0 },
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::MissingAccount("pool"));
     }
 
     #[test]
     fn fee_waiver_query() {
         let active = {
+            let mut pool = StakingPool::new();
             let mut s = StakeAccount::empty();
-            s.stake([2u8; 32], 100, 0).unwrap();
+            pool.open_stake(&mut s, [2u8; 32], 100, 0).unwrap();
             s
         };
         assert_eq!(external_spend_fee_bps(&active), 0);
         assert_eq!(external_spend_fee_bps(&StakeAccount::empty()), 2_000);
+        // Precise waiver: only during the lock.
+        assert!(active.waiver_active(0));
+        assert!(!active.waiver_active(staking::STAKE_LOCK_SECS));
+    }
+
+    #[test]
+    fn referral_lifecycle_end_to_end() {
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        // Fund the treasury so it can pay the $5 reward.
+        treasury.balance = 100 * REFERRAL_REWARD_BASE_UNITS;
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+        let px = process_instruction;
+
+        // Record the signup...
+        let out = px(
+            Instruction::RecordReferral { referrer: [7u8; 32], qr_id: [8u8; 32], now: 1_000 },
+            &mut accts,
+        )
+        .unwrap();
+        assert_eq!(out, InstructionOutput::ReferralRecorded);
+
+        // ...claim before verification fails.
+        let err = px(
+            Instruction::ClaimReferral { referrer: [7u8; 32], now: 2_000 },
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::Referral(ReferralError::NothingClaimable));
+
+        // Friend pays for verification...
+        let out = px(
+            Instruction::MarkVerified { qr_id: [8u8; 32], now: 3_000 },
+            &mut accts,
+        )
+        .unwrap();
+        assert_eq!(out, InstructionOutput::ReferralVerified);
+
+        // ...now the $5 is claimable and comes out of the treasury.
+        let out = px(
+            Instruction::ClaimReferral { referrer: [7u8; 32], now: 4_000 },
+            &mut accts,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            InstructionOutput::ReferralClaimed { payout: REFERRAL_REWARD_BASE_UNITS }
+        );
+        // Release the borrows before inspecting the treasury.
+        drop(accts);
+        assert_eq!(
+            treasury.balance,
+            100 * REFERRAL_REWARD_BASE_UNITS - REFERRAL_REWARD_BASE_UNITS
+        );
+
+        // Double-claim fails.
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+        let err = px(
+            Instruction::ClaimReferral { referrer: [7u8; 32], now: 5_000 },
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::Referral(ReferralError::DoubleClaim));
+    }
+
+    #[test]
+    fn referral_claim_needs_funded_treasury() {
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        // Treasury is empty: the payout cannot be covered.
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+        let px = process_instruction;
+
+        px(
+            Instruction::RecordReferral { referrer: [7u8; 32], qr_id: [8u8; 32], now: 0 },
+            &mut accts,
+        )
+        .unwrap();
+        px(Instruction::MarkVerified { qr_id: [8u8; 32], now: 1 }, &mut accts).unwrap();
+
+        let err = px(
+            Instruction::ClaimReferral { referrer: [7u8; 32], now: 2 },
+            &mut accts,
+        )
+        .unwrap_err();
+        // Fail closed: no payout minted out of thin air.
+        assert_eq!(err, ProgramError::Math(MathError::Overflow));
+    }
+
+    #[test]
+    fn referral_instructions_need_signer_and_ledger() {
+        let (mut mint, mut stake, mut pool, mut referrals, mut treasury) = setup();
+        let mut accts = accounts(&mut mint, &mut stake, &mut pool, &mut referrals, &mut treasury);
+        accts.is_signer = false;
+        let err = process_instruction(
+            Instruction::RecordReferral { referrer: [7u8; 32], qr_id: [8u8; 32], now: 0 },
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::MissingSignature);
+
+        accts.is_signer = true;
+        accts.referrals = None;
+        let err = process_instruction(
+            Instruction::RecordReferral { referrer: [7u8; 32], qr_id: [8u8; 32], now: 0 },
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::MissingAccount("referrals"));
     }
 }
