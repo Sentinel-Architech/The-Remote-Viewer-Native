@@ -57,6 +57,17 @@ impl Feature {
 /// Monthly/Yearly tiers that are Verified, or Founding members. The
 /// Free (ghost) tier is denied every gated feature — only low-lights
 /// until the viewer pays and verifies.
+///
+/// **Deprecated.** This evaluates policy over *caller-supplied* tier
+/// and verification values, which a modified client can simply lie
+/// about — it proves nothing. New code must use
+/// [`crate::gates::can_access`] with an [`Entitlement`](crate::entitlement::Entitlement)
+/// obtained via [`verify_and_check`](crate::entitlement::verify_and_check)
+/// (issuer-signed receipt). This function remains only for the
+/// historical tests below.
+#[deprecated(
+    note = "no provenance: use trv_backend::gates::can_access with a verified Entitlement instead"
+)]
 pub fn can_access(
     feature: Feature,
     tier: Tier,
@@ -83,7 +94,10 @@ pub fn low_lights(feature: Feature) -> bool {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
+    // The tests below exercise the deprecated caller-supplied-tier gate
+    // for historical coverage; new code must not use it.
     use super::*;
 
     #[test]

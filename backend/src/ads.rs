@@ -11,6 +11,7 @@
 //!
 //! Local-only, std-only, no network I/O.
 
+use crate::entitlement::Entitlement;
 use crate::subscriptions::Tier;
 
 /// The ad load a tier carries.
@@ -49,18 +50,27 @@ pub const GHOST_AD_SECS_PER_MIN: u32 = 15;
 
 /// The ads policy: ghost gets native ads, everyone else gets none.
 ///
+/// Takes the verified [`Entitlement`], not a caller-supplied [`Tier`]:
+/// a modified client could otherwise claim any tier and dodge ads.
+/// `None` (no entitlement) fails closed toward the ghost ad load —
+/// unproven viewers see ads.
 /// Implemented as a unit struct so the policy reads as
-/// `AdPolicy::ads_for_tier(tier)`; the policy itself is total over tiers.
+/// `AdPolicy::ads_for_tier(entitlement)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdPolicy;
 
 impl AdPolicy {
-    /// Ad load for a tier.
+    /// Ad load for an entitlement.
     ///
     /// `Tier::Free` (ghost) → [`AdLoad::Native`] at
     /// [`GHOST_AD_SECS_PER_MIN`] seconds per minute.
     /// Monthly / Yearly / Founding → [`AdLoad::None`].
-    pub fn ads_for_tier(tier: Tier) -> AdLoad {
+    /// `None` → [`AdLoad::Native`] (fail closed: unproven viewers see ads).
+    pub fn ads_for_tier(entitlement: Option<Entitlement>) -> AdLoad {
+        let tier = entitlement
+            .and_then(|e| e.check().ok())
+            .map(|e| e.tier())
+            .unwrap_or(Tier::Free);
         match tier {
             Tier::Free => AdLoad::Native {
                 secs_per_min: GHOST_AD_SECS_PER_MIN,
@@ -85,11 +95,58 @@ pub fn ad_secs_for_watch_secs(watch_secs: u64, load: AdLoad) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entitlement::{issue, verify_and_check};
+
+    /// Fixed issuer seed for tests only — never a real key.
+    const ISSUER_SEED: [u8; 32] = *b"test-ads-issuer-0000000000000000";
+
+    fn issuer_pubkey() -> [u8; 32] {
+        let (_, public) = trv_core::crypto::ed25519::generate(&ISSUER_SEED);
+        *public.as_bytes()
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .expect("test clock")
+    }
+
+    fn live_entitlement(tier: Tier) -> Entitlement {
+        let now = now_secs();
+        let receipt = issue(&ISSUER_SEED, tier, now, now + 30 * 86_400).expect("issue");
+        verify_and_check(&issuer_pubkey(), &receipt).expect("live")
+    }
+
+    fn expired_entitlement(tier: Tier) -> Entitlement {
+        let now = now_secs();
+        let receipt = issue(&ISSUER_SEED, tier, now - 60 * 86_400, now - 3_600)
+            .expect("issue");
+        crate::entitlement::verify_receipt(&issuer_pubkey(), &receipt).expect("genuine")
+    }
 
     #[test]
     fn ghost_tier_gets_native_ads() {
         assert_eq!(
-            AdPolicy::ads_for_tier(Tier::Free),
+            AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free))),
+            AdLoad::Native { secs_per_min: 15 }
+        );
+    }
+
+    #[test]
+    fn no_entitlement_fails_closed_to_ads() {
+        // Unproven viewers see ads — the revenue-protecting direction.
+        assert_eq!(
+            AdPolicy::ads_for_tier(None),
+            AdLoad::Native { secs_per_min: 15 }
+        );
+    }
+
+    #[test]
+    fn expired_entitlement_gets_ads() {
+        // A dead receipt is no proof of payment.
+        assert_eq!(
+            AdPolicy::ads_for_tier(Some(expired_entitlement(Tier::Monthly))),
             AdLoad::Native { secs_per_min: 15 }
         );
     }
@@ -97,7 +154,7 @@ mod tests {
     #[test]
     fn ghost_ad_rate_is_fifteen_per_minute() {
         assert_eq!(GHOST_AD_SECS_PER_MIN, 15);
-        let load = AdPolicy::ads_for_tier(Tier::Free);
+        let load = AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free)));
         assert!(load.has_ads());
         assert_eq!(load.label(), "native");
     }
@@ -105,7 +162,7 @@ mod tests {
     #[test]
     fn paid_tiers_get_no_ads() {
         for tier in [Tier::Monthly, Tier::Yearly, Tier::Founding] {
-            let load = AdPolicy::ads_for_tier(tier);
+            let load = AdPolicy::ads_for_tier(Some(live_entitlement(tier)));
             assert_eq!(load, AdLoad::None, "tier {:?} must be ad-free", tier);
             assert!(!load.has_ads());
             assert_eq!(load.label(), "none");
@@ -114,33 +171,33 @@ mod tests {
 
     #[test]
     fn ad_secs_one_minute() {
-        let load = AdPolicy::ads_for_tier(Tier::Free);
+        let load = AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free)));
         assert_eq!(ad_secs_for_watch_secs(60, load), 15);
     }
 
     #[test]
     fn ad_secs_two_minutes() {
-        let load = AdPolicy::ads_for_tier(Tier::Free);
+        let load = AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free)));
         assert_eq!(ad_secs_for_watch_secs(120, load), 30);
     }
 
     #[test]
     fn ad_secs_rounds_down() {
         // 30s watched -> 30*15/60 = 7.5 -> 7 (rounds down).
-        let load = AdPolicy::ads_for_tier(Tier::Free);
+        let load = AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free)));
         assert_eq!(ad_secs_for_watch_secs(30, load), 7);
     }
 
     #[test]
     fn ad_secs_zero_watch() {
-        let load = AdPolicy::ads_for_tier(Tier::Free);
+        let load = AdPolicy::ads_for_tier(Some(live_entitlement(Tier::Free)));
         assert_eq!(ad_secs_for_watch_secs(0, load), 0);
     }
 
     #[test]
     fn ad_secs_none_load_always_zero() {
         for tier in [Tier::Monthly, Tier::Yearly, Tier::Founding] {
-            let load = AdPolicy::ads_for_tier(tier);
+            let load = AdPolicy::ads_for_tier(Some(live_entitlement(tier)));
             assert_eq!(ad_secs_for_watch_secs(3600, load), 0);
         }
     }

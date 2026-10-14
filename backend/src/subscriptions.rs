@@ -503,6 +503,96 @@ impl GhostAccount {
     }
 }
 
+/// Upper bound on billable ghost months in one settlement. A caller
+/// passing an absurd `now` (e.g. `u64::MAX`) must not hang the billing
+/// tick in a near-infinite loop: beyond 100 years the settlement fails
+/// closed and the operator must intervene.
+const GHOST_MAX_BILLABLE_MONTHS: u64 = 1_200;
+
+/// Enforceable ghost-fee ledger: the single choke point through which
+/// ghost escalation is actually collected.
+///
+/// [`GhostAccount`] computes the fee schedule, but nothing in the app
+/// called [`GhostAccount::pay_monthly_fee`] outside tests — escalation
+/// was computed but never collected. This ledger closes that gap:
+/// it tracks how many billing months have been collected and
+/// [`GhostLedger::settle`] collects every uncollected month through
+/// `now`, depositing each fee into the community pool.
+///
+/// Caller contract (the app's billing tick, e.g. on start and daily):
+/// persist the ledger, call `settle` with the current time, persist
+/// again. `settle` is idempotent — calling it twice for the same `now`
+/// collects nothing the second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostLedger {
+    ghost: GhostAccount,
+    /// Billing months already collected (1-based count).
+    months_collected: u64,
+}
+
+impl GhostLedger {
+    /// Start tracking a ghost account; nothing collected yet.
+    pub fn new(ghost_since: u64) -> Self {
+        GhostLedger {
+            ghost: GhostAccount::new(ghost_since),
+            months_collected: 0,
+        }
+    }
+
+    /// The underlying ghost account.
+    pub fn ghost(self) -> GhostAccount {
+        self.ghost
+    }
+
+    /// Billing months already collected.
+    pub fn months_collected(self) -> u64 {
+        self.months_collected
+    }
+
+    /// Billing months elapsed through `now` (0 during the grace period).
+    fn months_elapsed(self, now: u64) -> Option<u64> {
+        let days = self.ghost.days_as_ghost(now);
+        if days < GHOST_GRACE_DAYS {
+            return Some(0);
+        }
+        let months = (days - GHOST_GRACE_DAYS) / 30 + 1;
+        if months > GHOST_MAX_BILLABLE_MONTHS {
+            return None;
+        }
+        Some(months)
+    }
+
+    /// Collect every uncollected billing month through `now` into the
+    /// community pool. Returns the total cents collected (0 when
+    /// nothing was due). Idempotent: re-settling the same period
+    /// collects nothing.
+    ///
+    /// Fail-closed: on any arithmetic overflow nothing is deposited and
+    /// `months_collected` is left unchanged — the caller must retry
+    /// later, never bill a partial amount.
+    pub fn settle(&mut self, pool: &mut CommunityPool, now: u64) -> Option<u64> {
+        let elapsed = self.months_elapsed(now)?;
+        if elapsed <= self.months_collected {
+            return Some(0);
+        }
+        // Compute the whole batch first; deposit only when every fee is
+        // known-good, so a late overflow never leaves a partial charge.
+        let mut total: u64 = 0;
+        let mut month = self.months_collected + 1;
+        while month <= elapsed {
+            let fee = u64::from(GHOST_FEE_STEP_CENTS)
+                .checked_mul(month)
+                .and_then(|f| u32::try_from(f).ok())
+                .map(u64::from)?;
+            total = total.checked_add(fee)?;
+            month += 1;
+        }
+        pool.deposit(total);
+        self.months_collected = elapsed;
+        Some(total)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Community pool: ghost fees fund NFT fee/gas waivers
 // ---------------------------------------------------------------------------
@@ -998,6 +1088,54 @@ mod tests {
             ghost.monthly_fee_cents(start + 365 * 86_400),
             Some(6000)
         );
+    }
+
+    #[test]
+    fn ghost_ledger_settle_collects_escalation() {
+        let start = 1_700_000_000u64;
+        let mut pool = CommunityPool::new();
+        let mut ledger = GhostLedger::new(start);
+        // Day 45: month 1 only -> $5.
+        assert_eq!(ledger.settle(&mut pool, start + 45 * 86_400), Some(500));
+        assert_eq!(ledger.months_collected(), 1);
+        assert_eq!(pool.balance_cents(), 500);
+        // Day 75: month 2 now due -> $10 more; month 1 not re-collected.
+        assert_eq!(ledger.settle(&mut pool, start + 75 * 86_400), Some(1000));
+        assert_eq!(ledger.months_collected(), 2);
+        assert_eq!(pool.balance_cents(), 1500);
+    }
+
+    #[test]
+    fn ghost_ledger_settle_is_idempotent() {
+        let start = 1_700_000_000u64;
+        let mut pool = CommunityPool::new();
+        let mut ledger = GhostLedger::new(start);
+        assert_eq!(ledger.settle(&mut pool, start + 45 * 86_400), Some(500));
+        // Same period again: nothing new to collect.
+        assert_eq!(ledger.settle(&mut pool, start + 50 * 86_400), Some(0));
+        assert_eq!(pool.balance_cents(), 500);
+        assert_eq!(ledger.months_collected(), 1);
+    }
+
+    #[test]
+    fn ghost_ledger_grace_period_collects_nothing() {
+        let start = 1_700_000_000u64;
+        let mut pool = CommunityPool::new();
+        let mut ledger = GhostLedger::new(start);
+        assert_eq!(ledger.settle(&mut pool, start + 29 * 86_400), Some(0));
+        assert_eq!(pool.balance_cents(), 0);
+        assert_eq!(ledger.months_collected(), 0);
+    }
+
+    #[test]
+    fn ghost_ledger_absurd_now_fails_closed() {
+        let start = 1_700_000_000u64;
+        let mut pool = CommunityPool::new();
+        let mut ledger = GhostLedger::new(start);
+        // u64::MAX would mean ~1.7M billing months: refuse, don't hang.
+        assert_eq!(ledger.settle(&mut pool, u64::MAX), None);
+        assert_eq!(pool.balance_cents(), 0);
+        assert_eq!(ledger.months_collected(), 0);
     }
 
     #[test]

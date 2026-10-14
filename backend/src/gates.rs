@@ -23,11 +23,39 @@
 //! re-check verification state from caller input, because caller input is
 //! exactly what this module refuses to trust.
 //!
-//! ## Honesty note
+//! ## Honesty note — read before relying on this
 //!
-//! A modified client can still skip calling these gates entirely: on-device
-//! checks raise the bar substantially but are not remote attestation. Same
-//! caveat class as [`crate::paywall`] and [`crate::entitlement`].
+//! These gates are enforced **in the honest client only**. Every check
+//! runs on the viewer's own device, and a modified client can simply
+//! skip calling them: on-device checks raise the bar substantially but
+//! are not remote attestation and are not a security boundary against
+//! the device owner. Same caveat class as [`crate::paywall`] and
+//! [`crate::entitlement`].
+//!
+//! **Server-side (or device-secure-enclave) enforcement is required
+//! before real money flows.** Do not represent these gates as
+//! non-bypassable, production-ready, or sufficient for billing
+//! enforcement. They are a correct, fail-closed policy layer for the
+//! honest client — nothing more.
+//!
+//! ## Feature entry-point map
+//!
+//! Every executable entry point for a gated feature MUST call
+//! [`can_access`] before the feature runs. Current state:
+//!
+//! | Feature | Entry points | Gated? |
+//! |---|---|---|
+//! | `ResearchFull` | *none yet* — no executable code path serves research | n/a |
+//! | `UnlimitedEi` | `ui::screen::SentinelScreen::submit` (driven by `android::app`, `ui::router::Router`, terminal example) | **yes** — denies without a live entitlement |
+//! | `Customization` | *none yet* — no executable code path | n/a |
+//! | `Messaging` | `ui::chat::ChatView::send`, `ui::conversations::ConversationsScreen` | **yes** |
+//! | `ArRewards` | *none yet* — no executable code path | n/a |
+//! | `NewsFull` | *none yet* — no executable code path | n/a |
+//! | `VpnBasic` / `VpnPlus` | *none yet* — VPN is parked | n/a |
+//!
+//! When a new entry point is added for any feature, it MUST consult
+//! [`can_access`] first. An entry point that runs a gated feature
+//! without a gate check is a defect, not a shortcut.
 
 use crate::entitlement::Entitlement;
 use crate::subscriptions::Tier;
