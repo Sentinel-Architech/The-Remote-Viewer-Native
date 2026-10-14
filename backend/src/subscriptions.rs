@@ -3,6 +3,18 @@
 //! Verified locally on-device. No billing network calls here —
 //! Solana is the separate track, only for TRV token/governance.
 
+use crate::entitlement;
+use crate::entitlement::EntitlementError;
+
+/// Seconds in a 30-day billing month.
+pub const MONTH_SECS: u64 = 30 * 86_400;
+/// Seconds in a 365-day billing year.
+pub const YEAR_SECS: u64 = 365 * 86_400;
+/// Ghost grace period: no fees for the first 30 days as ghost.
+pub const GHOST_GRACE_DAYS: u64 = 30;
+/// Ghost fee step: $5.00 (500 cents) per billing month after grace.
+pub const GHOST_FEE_STEP_CENTS: u32 = 500;
+
 /// Subscription tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -242,6 +254,277 @@ pub fn unlimited_entitlement(tier: Tier, verification: VerificationStatus) -> bo
     }
 }
 
+// ---------------------------------------------------------------------------
+// Subscription lifecycle (the money loop)
+// ---------------------------------------------------------------------------
+
+/// Errors from subscription lifecycle operations.
+///
+/// Fail closed: bad windows never produce a subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionError {
+    /// `expires_at <= started_at`: the subscription window is inverted.
+    BadWindow,
+    /// A paid billing tier (Monthly/Yearly) was requested with no price tier.
+    MissingPriceTier,
+    /// A price tier was given for a non-billable tier (Free/Founding).
+    UnexpectedPriceTier,
+}
+
+impl core::fmt::Display for SubscriptionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            SubscriptionError::BadWindow => "subscription: invalid validity window",
+            SubscriptionError::MissingPriceTier => "subscription: paid tier needs a price tier",
+            SubscriptionError::UnexpectedPriceTier => {
+                "subscription: price tier not allowed for this tier"
+            }
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::error::Error for SubscriptionError {}
+
+/// Lifecycle status of a [`Subscription`] at a given moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionStatus {
+    /// Within its validity window (or cancelled-but-still-paid-through).
+    Active,
+    /// Past `expires_at` with `auto_renew` on: awaiting the next payment.
+    Expired,
+    /// Past `expires_at` with `auto_renew` off: dead, needs re-purchase.
+    Lapsed,
+    /// Explicitly cancelled by the viewer; no further renewals.
+    Cancelled,
+}
+
+/// A subscription: tier + price + validity window + renewal preference.
+///
+/// All time is injected as unix seconds — there is **no system-clock
+/// dependency** in this logic, so expiry is deterministic and testable.
+/// Fields are private; build with [`Subscription::new`] which validates
+/// the window and the tier/price combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Subscription {
+    tier: Tier,
+    paid_tier: Option<PaidTier>,
+    started_at: u64,
+    expires_at: u64,
+    auto_renew: bool,
+    cancelled: bool,
+}
+
+impl Subscription {
+    /// Create a subscription. Fails closed when `expires_at <= started_at`
+    /// or when the tier/price combination is incoherent (paid billing
+    /// tiers must carry a price; Free/Founding must not).
+    pub fn new(
+        tier: Tier,
+        paid_tier: Option<PaidTier>,
+        started_at: u64,
+        expires_at: u64,
+        auto_renew: bool,
+    ) -> Result<Self, SubscriptionError> {
+        if expires_at <= started_at {
+            return Err(SubscriptionError::BadWindow);
+        }
+        match (tier, paid_tier) {
+            (Tier::Monthly | Tier::Yearly, None) => {
+                return Err(SubscriptionError::MissingPriceTier)
+            }
+            (Tier::Free | Tier::Founding, Some(_)) => {
+                return Err(SubscriptionError::UnexpectedPriceTier)
+            }
+            _ => {}
+        }
+        Ok(Subscription {
+            tier,
+            paid_tier,
+            started_at,
+            expires_at,
+            auto_renew,
+            cancelled: false,
+        })
+    }
+
+    /// Billing tier (Monthly/Yearly/Free/Founding).
+    pub fn tier(self) -> Tier {
+        self.tier
+    }
+
+    /// Price tier (Tier1/2/3), if this subscription is paid.
+    pub fn paid_tier(self) -> Option<PaidTier> {
+        self.paid_tier
+    }
+
+    /// Unix seconds the subscription started.
+    pub fn started_at(self) -> u64 {
+        self.started_at
+    }
+
+    /// Unix seconds the subscription lapses without renewal.
+    pub fn expires_at(self) -> u64 {
+        self.expires_at
+    }
+
+    /// Whether renewal is automatic at expiry.
+    pub fn auto_renew(self) -> bool {
+        self.auto_renew
+    }
+
+    /// Lifecycle status at injected time `now`.
+    ///
+    /// Cancelled wins over everything (a cancelled subscription never
+    /// renews, even if paid through). Past expiry with `auto_renew` on
+    /// is [`SubscriptionStatus::Expired`] (renewable); with it off it is
+    /// [`SubscriptionStatus::Lapsed`].
+    pub fn status(self, now: u64) -> SubscriptionStatus {
+        if self.cancelled {
+            return SubscriptionStatus::Cancelled;
+        }
+        if now >= self.expires_at {
+            return if self.auto_renew {
+                SubscriptionStatus::Expired
+            } else {
+                SubscriptionStatus::Lapsed
+            };
+        }
+        SubscriptionStatus::Active
+    }
+
+    /// Convenience: true only while [`SubscriptionStatus::Active`].
+    pub fn is_active(self, now: u64) -> bool {
+        self.status(now) == SubscriptionStatus::Active
+    }
+
+    /// Renew for `period_secs` more seconds.
+    ///
+    /// The extension starts at `max(now, expires_at)`: renewing early
+    /// keeps the remaining paid time (no double-charging), renewing
+    /// late restarts from now. Clears cancellation.
+    pub fn renew(&mut self, now: u64, period_secs: u64) {
+        let base = self.expires_at.max(now);
+        self.expires_at = base.saturating_add(period_secs);
+        self.cancelled = false;
+    }
+
+    /// Renew for the subscription's own billing period (Monthly = 30
+    /// days, Yearly = 365 days). Free/Founding have no period and are
+    /// left unchanged.
+    pub fn renew_period(&mut self, now: u64) {
+        let period = match self.tier {
+            Tier::Monthly => MONTH_SECS,
+            Tier::Yearly => YEAR_SECS,
+            Tier::Free | Tier::Founding => return,
+        };
+        self.renew(now, period);
+    }
+
+    /// Cancel: no further renewals. A paid-through window stays
+    /// [`SubscriptionStatus::Active`] until `expires_at`.
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    /// Price of one billing period in cents, for the subscription's
+    /// tier and price tier. `None` for non-billable tiers.
+    pub fn period_price_cents(self) -> Option<u32> {
+        let paid = self.paid_tier?;
+        Some(match self.tier {
+            Tier::Monthly => paid.monthly_cents(),
+            Tier::Yearly => paid.yearly_cents(),
+            Tier::Free | Tier::Founding => return None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ghost tier escalation
+// ---------------------------------------------------------------------------
+
+/// An unpaid, unverified account ("ghost").
+///
+/// Per spec: after 30 days as ghost the viewer is billed $5 for the
+/// first month, $10 for the next, and +$5 each month after, until they
+/// verify and pay. The grace period is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostAccount {
+    /// Unix seconds the viewer became a ghost.
+    ghost_since: u64,
+}
+
+impl GhostAccount {
+    /// Create a ghost account starting at `ghost_since` (unix seconds).
+    pub fn new(ghost_since: u64) -> Self {
+        GhostAccount { ghost_since }
+    }
+
+    /// When ghost status began (unix seconds).
+    pub fn ghost_since(self) -> u64 {
+        self.ghost_since
+    }
+
+    /// Whole days spent as a ghost at injected time `now`.
+    pub fn days_as_ghost(self, now: u64) -> u64 {
+        now.saturating_sub(self.ghost_since) / 86_400
+    }
+
+    /// Current monthly fee in cents at injected time `now`.
+    ///
+    /// - First 30 days: 0 (grace).
+    /// - Month 1 after grace: 500 ($5), month 2: 1000 ($10),
+    ///   month n: 500*n — i.e. +$5 each month after.
+    ///
+    /// Returns `None` on arithmetic overflow (fail closed; the caller
+    /// must not bill an uncomputable amount).
+    pub fn monthly_fee_cents(self, now: u64) -> Option<u32> {
+        let days = self.days_as_ghost(now);
+        if days < GHOST_GRACE_DAYS {
+            return Some(0);
+        }
+        let billing_month = (days - GHOST_GRACE_DAYS) / 30 + 1;
+        billing_month
+            .checked_mul(u64::from(GHOST_FEE_STEP_CENTS))
+            .and_then(|fee| u32::try_from(fee).ok())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receipt bridge: subscriptions <-> signed entitlements
+// ---------------------------------------------------------------------------
+
+/// Issue a signed entitlement receipt for a subscription.
+///
+/// Issuer-side only: `issuer_seed` must never leave the signing
+/// environment. The receipt's tier and validity window are the
+/// subscription's own — the signature is what makes them trustworthy
+/// on-device (see [`entitlement`]).
+pub fn issue_subscription_receipt(
+    issuer_seed: &[u8; 32],
+    sub: &Subscription,
+) -> Result<Vec<u8>, EntitlementError> {
+    entitlement::issue(issuer_seed, sub.tier, sub.started_at, sub.expires_at)
+}
+
+/// Verify a receipt's provenance and check it against injected time
+/// `now` (not the system clock).
+///
+/// Returns the granted [`Tier`] only when the signature is genuine AND
+/// `now < expires_at`. This is the deterministic, testable sibling of
+/// [`entitlement::verify_and_check`], which reads the system clock.
+pub fn receipt_active_at(
+    issuer_pubkey: &[u8; 32],
+    receipt: &[u8],
+    now: u64,
+) -> Result<Tier, EntitlementError> {
+    let ent = entitlement::verify_receipt(issuer_pubkey, receipt)?;
+    if now >= ent.expires_at() {
+        return Err(EntitlementError::Expired);
+    }
+    Ok(ent.tier())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +731,262 @@ mod tests {
             assert!(unlimited_entitlement(tier, VerificationStatus::Verified));
             assert!(!unlimited_entitlement(tier, VerificationStatus::Ineligible));
         }
+    }
+
+    // ---- Subscription lifecycle ----
+
+    fn monthly_sub(now: u64) -> Subscription {
+        Subscription::new(Tier::Monthly, Some(PaidTier::Tier2), now, now + MONTH_SECS, true)
+            .expect("valid subscription")
+    }
+
+    #[test]
+    fn subscription_new_rejects_bad_window() {
+        let now = 1_700_000_000;
+        assert_eq!(
+            Subscription::new(Tier::Monthly, Some(PaidTier::Tier1), now, now, true),
+            Err(SubscriptionError::BadWindow)
+        );
+        assert_eq!(
+            Subscription::new(Tier::Monthly, Some(PaidTier::Tier1), now + 1, now, true),
+            Err(SubscriptionError::BadWindow)
+        );
+    }
+
+    #[test]
+    fn subscription_new_rejects_incoherent_tier_price() {
+        let now = 1_700_000_000;
+        // Paid billing tier without a price tier: rejected.
+        assert_eq!(
+            Subscription::new(Tier::Monthly, None, now, now + MONTH_SECS, true),
+            Err(SubscriptionError::MissingPriceTier)
+        );
+        assert_eq!(
+            Subscription::new(Tier::Yearly, None, now, now + YEAR_SECS, false),
+            Err(SubscriptionError::MissingPriceTier)
+        );
+        // Price tier on a non-billable tier: rejected.
+        assert_eq!(
+            Subscription::new(Tier::Free, Some(PaidTier::Tier1), now, now + 86_400, false),
+            Err(SubscriptionError::UnexpectedPriceTier)
+        );
+        assert_eq!(
+            Subscription::new(Tier::Founding, Some(PaidTier::Tier3), now, now + 86_400, false),
+            Err(SubscriptionError::UnexpectedPriceTier)
+        );
+        // Coherent combos accepted.
+        assert!(Subscription::new(Tier::Free, None, now, now + 86_400, false).is_ok());
+        assert!(Subscription::new(Tier::Founding, None, now, now + 86_400, false).is_ok());
+    }
+
+    #[test]
+    fn subscription_expiry_enforced() {
+        let now = 1_700_000_000;
+        let sub = monthly_sub(now);
+        assert!(sub.is_active(now));
+        assert!(sub.is_active(now + MONTH_SECS - 1));
+        // At exactly expires_at the subscription is dead.
+        assert!(!sub.is_active(now + MONTH_SECS));
+        assert_eq!(sub.status(now + MONTH_SECS), SubscriptionStatus::Expired);
+    }
+
+    #[test]
+    fn subscription_lapse_when_no_auto_renew() {
+        let now = 1_700_000_000;
+        let sub = Subscription::new(
+            Tier::Yearly,
+            Some(PaidTier::Tier1),
+            now,
+            now + YEAR_SECS,
+            false, // no auto-renew
+        )
+        .expect("valid subscription");
+        assert_eq!(sub.status(now), SubscriptionStatus::Active);
+        assert_eq!(
+            sub.status(now + YEAR_SECS),
+            SubscriptionStatus::Lapsed
+        );
+    }
+
+    #[test]
+    fn subscription_renew_extends_from_expiry_when_early() {
+        let now = 1_700_000_000;
+        let mut sub = monthly_sub(now);
+        // Renew 10 days in: the remaining 20 days are kept.
+        sub.renew(now + 10 * 86_400, MONTH_SECS);
+        assert_eq!(sub.expires_at(), now + 2 * MONTH_SECS);
+    }
+
+    #[test]
+    fn subscription_renew_restarts_from_now_when_late() {
+        let now = 1_700_000_000;
+        let mut sub = monthly_sub(now);
+        // Renew 5 days after expiry: starts from now, not the old expiry.
+        sub.renew(now + MONTH_SECS + 5 * 86_400, MONTH_SECS);
+        assert_eq!(sub.expires_at(), now + MONTH_SECS + 5 * 86_400 + MONTH_SECS);
+        assert!(sub.is_active(now + MONTH_SECS + 5 * 86_400));
+    }
+
+    #[test]
+    fn subscription_renew_period_uses_billing_cycle() {
+        let now = 1_700_000_000;
+        let mut sub = monthly_sub(now);
+        sub.renew_period(now);
+        assert_eq!(sub.expires_at(), now + 2 * MONTH_SECS);
+
+        let mut yearly = Subscription::new(
+            Tier::Yearly,
+            Some(PaidTier::Tier3),
+            now,
+            now + YEAR_SECS,
+            true,
+        )
+        .expect("valid subscription");
+        yearly.renew_period(now);
+        assert_eq!(yearly.expires_at(), now + 2 * YEAR_SECS);
+    }
+
+    #[test]
+    fn subscription_cancel_blocks_renewal() {
+        let now = 1_700_000_000;
+        let mut sub = monthly_sub(now);
+        sub.cancel();
+        // Cancelled wins even while paid through.
+        assert_eq!(sub.status(now), SubscriptionStatus::Cancelled);
+        assert!(!sub.is_active(now));
+        // Renewing after cancel clears the cancellation.
+        sub.renew(now, MONTH_SECS);
+        assert_eq!(sub.status(now), SubscriptionStatus::Active);
+    }
+
+    #[test]
+    fn subscription_period_price_cents() {
+        let now = 1_700_000_000;
+        let monthly = monthly_sub(now); // Tier2 monthly = $25
+        assert_eq!(monthly.period_price_cents(), Some(2500));
+        let yearly = Subscription::new(
+            Tier::Yearly,
+            Some(PaidTier::Tier1),
+            now,
+            now + YEAR_SECS,
+            true,
+        )
+        .expect("valid subscription");
+        assert_eq!(yearly.period_price_cents(), Some(10000)); // $100
+        let free =
+            Subscription::new(Tier::Free, None, now, now + 86_400, false).expect("valid");
+        assert_eq!(free.period_price_cents(), None);
+    }
+
+    // ---- Ghost escalation ----
+
+    #[test]
+    fn ghost_grace_period_is_free() {
+        let ghost = GhostAccount::new(1_700_000_000);
+        let start = ghost.ghost_since();
+        assert_eq!(ghost.days_as_ghost(start), 0);
+        assert_eq!(ghost.monthly_fee_cents(start), Some(0));
+        // Day 29: still free.
+        assert_eq!(ghost.monthly_fee_cents(start + 29 * 86_400), Some(0));
+    }
+
+    #[test]
+    fn ghost_escalation_math() {
+        let ghost = GhostAccount::new(1_700_000_000);
+        let start = ghost.ghost_since();
+        // Day 30: first billing month begins -> $5.
+        assert_eq!(ghost.monthly_fee_cents(start + 30 * 86_400), Some(500));
+        // Day 59: still month 1.
+        assert_eq!(ghost.monthly_fee_cents(start + 59 * 86_400), Some(500));
+        // Day 60: month 2 -> $10.
+        assert_eq!(ghost.monthly_fee_cents(start + 60 * 86_400), Some(1000));
+        // Day 90: month 3 -> $15 (+$5 each month after).
+        assert_eq!(ghost.monthly_fee_cents(start + 90 * 86_400), Some(1500));
+        // Day 120: month 4 -> $20.
+        assert_eq!(ghost.monthly_fee_cents(start + 120 * 86_400), Some(2000));
+        // One year as ghost: 335 paid days -> billing month 12 -> $60.
+        assert_eq!(
+            ghost.monthly_fee_cents(start + 365 * 86_400),
+            Some(6000)
+        );
+    }
+
+    #[test]
+    fn ghost_fee_before_start_is_zero() {
+        // now before ghost_since: saturates, treated as day 0.
+        let ghost = GhostAccount::new(1_700_000_000);
+        assert_eq!(ghost.days_as_ghost(1_699_999_999), 0);
+        assert_eq!(ghost.monthly_fee_cents(1_699_999_999), Some(0));
+    }
+
+    // ---- Receipt bridge ----
+
+    /// Fixed issuer seed for tests only — never a real key.
+    const BILLING_ISSUER_SEED: [u8; 32] = *b"billing-issuer-seed0000000000000";
+    const BILLING_OTHER_SEED: [u8; 32] = *b"billing-attacker-seed00000000000";
+
+    fn billing_pubkey() -> [u8; 32] {
+        let (_, public) = trv_core::crypto::ed25519::generate(&BILLING_ISSUER_SEED);
+        *public.as_bytes()
+    }
+
+    #[test]
+    fn subscription_receipt_round_trip() {
+        let now = 1_700_000_000;
+        let sub = monthly_sub(now);
+        let receipt = issue_subscription_receipt(&BILLING_ISSUER_SEED, &sub)
+            .expect("issuance");
+        let tier = receipt_active_at(&billing_pubkey(), &receipt, now).expect("active");
+        assert_eq!(tier, Tier::Monthly);
+    }
+
+    #[test]
+    fn subscription_receipt_expiry_enforced_at_injected_time() {
+        let now = 1_700_000_000;
+        let sub = monthly_sub(now);
+        let receipt = issue_subscription_receipt(&BILLING_ISSUER_SEED, &sub)
+            .expect("issuance");
+        // One second before expiry: active.
+        assert!(receipt_active_at(&billing_pubkey(), &receipt, now + MONTH_SECS - 1).is_ok());
+        // At expiry with injected time: dead — even though the receipt is genuine.
+        assert_eq!(
+            receipt_active_at(&billing_pubkey(), &receipt, now + MONTH_SECS),
+            Err(EntitlementError::Expired)
+        );
+    }
+
+    #[test]
+    fn subscription_receipt_tampered_rejected() {
+        let now = 1_700_000_000;
+        let sub = monthly_sub(now);
+        let mut receipt = issue_subscription_receipt(&BILLING_ISSUER_SEED, &sub)
+            .expect("issuance");
+        // Flip the tier byte to a different *valid* tier: decode passes,
+        // but the signature no longer matches.
+        receipt[5] = 2; // Tier::Yearly discriminant (was Monthly = 1)
+        assert_eq!(
+            receipt_active_at(&billing_pubkey(), &receipt, now),
+            Err(EntitlementError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn subscription_receipt_forged_rejected() {
+        // Signed by a different issuer key: provenance fails.
+        let now = 1_700_000_000;
+        let sub = monthly_sub(now);
+        let forged = issue_subscription_receipt(&BILLING_OTHER_SEED, &sub)
+            .expect("forged issuance");
+        assert_eq!(
+            receipt_active_at(&billing_pubkey(), &forged, now),
+            Err(EntitlementError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn subscription_error_display_is_stable() {
+        assert!(!format!("{}", SubscriptionError::BadWindow).is_empty());
+        assert!(!format!("{}", SubscriptionError::MissingPriceTier).is_empty());
+        assert!(!format!("{}", SubscriptionError::UnexpectedPriceTier).is_empty());
     }
 }
