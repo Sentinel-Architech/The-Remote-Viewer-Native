@@ -2,12 +2,32 @@
 //!
 //! Real Ed25519/age wiring lands here later behind this stable API.
 //! Nothing leaves the device.
+//!
+//! SECURITY WARNING — the stub key derivation below
+//! (`public[i] = secret[i].rotate_left(3) ^ 0xA5`) is REVERSIBLE and
+//! NOT secure: anyone holding a public key can trivially recover the
+//! secret key by applying `rotate_right(3) ^ 0xA5`. It exists only as
+//! a deterministic placeholder so the API shape is stable. It MUST be
+//! replaced by real Ed25519 (e.g. ed25519-dalek, MIT/Apache-2.0 — an
+//! external crate, intentionally not implemented here) before any
+//! production use, key exchange, or anything adversarial.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 32-byte secret key. Never serialized off-device.
-#[derive(Clone, Debug)]
+///
+/// Best-effort zeroization: [`Drop`] overwrites the bytes in place
+/// with [`core::ptr::write_volatile`] so the compiler cannot elide
+/// the wipe. This is best-effort only — copies (e.g. from
+/// [`Clone`]), compiler spills, and swap can retain key material;
+/// real key-hygiene still requires the production Ed25519 backend.
 pub struct SecretKey([u8; 32]);
+
+impl Clone for SecretKey {
+    fn clone(&self) -> Self {
+        SecretKey(self.0)
+    }
+}
 
 impl SecretKey {
     /// Raw bytes for future in-memory signing use. Never leaves the device.
@@ -16,15 +36,63 @@ impl SecretKey {
     }
 }
 
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print key material: logs and panic messages must not
+        // leak secrets.
+        f.write_str("SecretKey(<redacted>)")
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        // Best-effort zeroization. write_volatile keeps the compiler
+        // from optimizing the overwrite away.
+        for b in self.0.iter_mut() {
+            // SAFETY: `b` is a valid, uniquely-borrowed byte; the
+            // volatile write targets exactly that location.
+            unsafe {
+                core::ptr::write_volatile(b, 0u8);
+            }
+        }
+    }
+}
+
 /// 32-byte public key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PublicKey([u8; 32]);
 
 /// Device-local keypair.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is redacted: the secret half prints as `<redacted>` so key
+/// material never lands in logs or panic messages.
 pub struct Keypair {
     pub secret: SecretKey,
     pub public: PublicKey,
+}
+
+impl Clone for Keypair {
+    fn clone(&self) -> Self {
+        Keypair {
+            secret: self.secret.clone(),
+            public: self.public,
+        }
+    }
+}
+
+impl std::fmt::Debug for Keypair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let public_hex: String = self
+            .public
+            .0
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        f.debug_struct("Keypair")
+            .field("secret", &"<redacted>")
+            .field("public", &public_hex)
+            .finish()
+    }
 }
 
 fn xorshift64(mut x: u64) -> u64 {
@@ -73,8 +141,11 @@ impl Keypair {
             s = xorshift64(s.wrapping_add(0x9E37_79B9_7F4A_7C15));
             chunk.copy_from_slice(&s.to_le_bytes());
         }
-        // STUB public derivation — NOT real Ed25519. Replace with
-        // ed25519-dalek (MIT/Apache-2.0) before any production use.
+        // STUB public derivation — REVERSIBLE, NOT real Ed25519, NOT
+        // secure. public[i] = secret[i].rotate_left(3) ^ 0xA5 means the
+        // secret is recoverable from the public key with
+        // rotate_right(3) ^ 0xA5. Replace with ed25519-dalek
+        // (MIT/Apache-2.0) before any production use.
         let mut public = [0u8; 32];
         for (i, b) in secret.iter().enumerate() {
             public[i] = b.rotate_left(3) ^ 0xA5;
@@ -151,6 +222,27 @@ mod tests {
         assert_eq!(cloned.secret.as_bytes(), keypair.secret.as_bytes());
         let copied: PublicKey = keypair.public;
         assert_eq!(copied, keypair.public);
+    }
+
+    #[test]
+    fn debug_never_leaks_secret_material() {
+        let keypair = Keypair::generate();
+        let secret_dbg = format!("{:?}", keypair.secret);
+        let pair_dbg = format!("{:?}", keypair);
+        // The redaction marker must appear...
+        assert!(secret_dbg.contains("<redacted>"));
+        assert!(pair_dbg.contains("<redacted>"));
+        // ...and the secret bytes must not appear in hex form.
+        let secret_hex: String = keypair
+            .secret
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert!(!secret_dbg.contains(&secret_hex));
+        assert!(!pair_dbg.contains(&secret_hex));
+        // Public key hex is NOT secret and stays visible.
+        assert!(pair_dbg.contains(&keypair.public_hex()));
     }
 
     #[test]

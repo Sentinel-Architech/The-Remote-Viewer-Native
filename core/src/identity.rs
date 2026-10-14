@@ -5,8 +5,27 @@
 
 use crate::crypto::Keypair;
 
+/// Errors for local identity operations. All local; no I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityError {
+    /// The handle was empty after trimming. Handles like `"@RV.com"`
+    /// (empty local part) are never valid.
+    InvalidHandle,
+}
+
+impl IdentityError {
+    /// Short machine-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            IdentityError::InvalidHandle => "invalid-handle",
+        }
+    }
+}
+
 /// A Remote Viewer's on-device identity.
-#[derive(Debug)]
+///
+/// `Debug` is redacted: the embedded keypair prints as `<redacted>`
+/// so secret key material never lands in logs or panic messages.
 pub struct LocalIdentity {
     keypair: Keypair,
     handle: String,
@@ -15,17 +34,35 @@ pub struct LocalIdentity {
     has_state_id: bool,
 }
 
+impl std::fmt::Debug for LocalIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalIdentity")
+            .field("keypair", &"<redacted>")
+            .field("handle", &self.handle)
+            .field("has_state_id", &self.has_state_id)
+            .finish()
+    }
+}
+
 impl LocalIdentity {
     /// Create a new local identity for `handle`. Fully offline.
     ///
+    /// The handle is trimmed; a handle that is empty after trimming
+    /// is rejected with [`IdentityError::InvalidHandle`] (no more
+    /// `"@RV.com"` with an empty local part).
+    ///
     /// `has_state_id` records whether the viewer owns a State ID; it
     /// drives the verification-eligibility rule and nothing else.
-    pub fn new(handle: &str, has_state_id: bool) -> Self {
-        LocalIdentity {
-            keypair: Keypair::generate(),
-            handle: handle.to_string(),
-            has_state_id,
+    pub fn new(handle: &str, has_state_id: bool) -> Result<Self, IdentityError> {
+        let trimmed = handle.trim();
+        if trimmed.is_empty() {
+            return Err(IdentityError::InvalidHandle);
         }
+        Ok(LocalIdentity {
+            keypair: Keypair::generate(),
+            handle: trimmed.to_string(),
+            has_state_id,
+        })
     }
 
     /// Whether the viewer owns a State ID.
@@ -54,8 +91,14 @@ impl LocalIdentity {
 
     /// Destroy = Restart: drop keys. Nothing to wipe remotely — nothing
     /// was ever transmitted.
+    ///
+    /// Best-effort zeroization: dropping `self` runs [`Keypair`]'s
+    /// field drops, and [`crate::crypto::SecretKey`]'s `Drop` impl
+    /// overwrites the secret bytes in place (see its docs for the
+    /// best-effort caveats).
     pub fn destroy(self) {
-        // `self` is consumed; keys die with it.
+        // `self` is consumed; keys die with it, and SecretKey::drop
+        // wipes the secret bytes on the way out.
     }
 }
 
@@ -64,10 +107,20 @@ impl LocalIdentity {
 /// Kept minimal and duplicated from the backend crate on purpose:
 /// `core` must stay backend-free so it compiles as a standalone
 /// on-device primitive. Both crates agree on the rule.
+///
+/// Mapping to the backend's fuller lifecycle
+/// (`backend::subscriptions::VerificationStatus`): core's
+/// [`VerificationStatus::Unverified`] is the backend's initial state
+/// for an eligible viewer; [`VerificationStatus::Ineligible`] is the
+/// shared terminal "no State ID" state. The backend's `Pending` and
+/// `Verified` states have no core equivalent — they are tracked
+/// server-side after the viewer begins verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationStatus {
-    /// Owns a State ID: eligible to begin background ID verification.
-    Eligible,
+    /// Owns a State ID: unverified so far, but eligible to begin
+    /// background ID verification. Matches the backend's initial
+    /// state for eligible viewers.
+    Unverified,
     /// No State ID: ineligible for verification.
     Ineligible,
 }
@@ -78,7 +131,7 @@ pub enum VerificationStatus {
 /// is ineligible."
 pub fn verification_eligibility(has_state_id: bool) -> VerificationStatus {
     if has_state_id {
-        VerificationStatus::Eligible
+        VerificationStatus::Unverified
     } else {
         VerificationStatus::Ineligible
     }
@@ -90,15 +143,31 @@ mod tests {
 
     #[test]
     fn decentralized_email_is_handle_at_rv_dot_com() {
-        let id = LocalIdentity::new("skyviewer", true);
+        let id = LocalIdentity::new("skyviewer", true).expect("valid handle");
         assert_eq!(id.decentralized_email(), "skyviewer@RV.com");
         assert!(id.decentralized_email().starts_with("skyviewer"));
         assert!(id.decentralized_email().contains("@RV.com"));
     }
 
     #[test]
+    fn handle_is_trimmed_and_empty_after_trim_is_rejected() {
+        let id = LocalIdentity::new("  skyviewer  ", true).expect("valid handle");
+        assert_eq!(id.decentralized_email(), "skyviewer@RV.com");
+        // No more "@RV.com" with an empty local part.
+        assert!(matches!(
+            LocalIdentity::new("", true),
+            Err(IdentityError::InvalidHandle)
+        ));
+        assert!(matches!(
+            LocalIdentity::new("   \t  ", true),
+            Err(IdentityError::InvalidHandle)
+        ));
+        assert_eq!(IdentityError::InvalidHandle.label(), "invalid-handle");
+    }
+
+    #[test]
     fn verification_ineligible_without_state_id() {
-        let id = LocalIdentity::new("ghost", false);
+        let id = LocalIdentity::new("ghost", false).expect("valid handle");
         assert!(!id.has_state_id());
         assert_eq!(id.verification_status(), VerificationStatus::Ineligible);
         assert_eq!(
@@ -108,27 +177,43 @@ mod tests {
     }
 
     #[test]
-    fn verification_eligible_with_state_id() {
-        let id = LocalIdentity::new("verified", true);
+    fn verification_unverified_with_state_id() {
+        let id = LocalIdentity::new("verified", true).expect("valid handle");
         assert!(id.has_state_id());
-        assert_eq!(id.verification_status(), VerificationStatus::Eligible);
+        assert_eq!(id.verification_status(), VerificationStatus::Unverified);
         assert_eq!(
             verification_eligibility(true),
-            VerificationStatus::Eligible
+            VerificationStatus::Unverified
         );
     }
 
     #[test]
     fn address_is_64_hex_char_public_key() {
-        let id = LocalIdentity::new("addr", true);
+        let id = LocalIdentity::new("addr", true).expect("valid handle");
         let address = id.address();
         assert_eq!(address.len(), 64);
         assert!(address.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
+    fn debug_never_leaks_key_material() {
+        let id = LocalIdentity::new("quiet", true).expect("valid handle");
+        let dbg = format!("{:?}", id);
+        assert!(dbg.contains("<redacted>"));
+        // The handle and flags are not secret and stay visible.
+        assert!(dbg.contains("quiet"));
+        assert!(dbg.contains("has_state_id"));
+        // The keypair (secret AND public halves) prints redacted: the
+        // conservative choice while the stub public derivation is
+        // reversible (see the crypto module docs). The public
+        // address remains available through address().
+        assert!(!dbg.contains(&id.address()));
+        assert_eq!(id.address().len(), 64);
+    }
+
+    #[test]
     fn destroy_consumes_identity() {
-        let id = LocalIdentity::new("temp", false);
+        let id = LocalIdentity::new("temp", false).expect("valid handle");
         id.destroy(); // Destroy = Restart: keys die locally, nothing to wipe remotely.
     }
 }

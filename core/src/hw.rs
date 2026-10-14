@@ -7,7 +7,11 @@
 //! corporate SDKs, no network I/O.
 //!
 //! Real platform bindings (e.g. GrapheneOS native camera/GNSS paths)
-//! plug in behind these same traits later.
+//! plug in behind these same traits later. Every trait method that
+//! needs real hardware is a **platform-integration point**: the stub
+//! below returns [`HwError::Unavailable`] for those calls rather than
+//! faking success, so a caller can never mistake a stub for a working
+//! device capability.
 
 /// An image frame captured natively. Stub: metadata only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,9 +53,15 @@ pub trait Camera {
 }
 
 /// Native phone calling.
+///
+/// Platform-integration point: real bindings place an actual call
+/// behind this trait. The in-process stub reports
+/// [`HwError::Unavailable`].
 pub trait Phone {
-    /// Place a call to a local contact identifier. Stub: local-only
-    /// placeholder, no actual call is placed.
+    /// Place a call to a local contact identifier.
+    ///
+    /// Stub behavior: returns [`HwError::Unavailable`] — no call is
+    /// placed, and the stub never fakes success.
     fn dial(&mut self, contact: &str) -> Result<(), HwError>;
 }
 
@@ -63,16 +73,29 @@ pub trait Gps {
 }
 
 /// Native text messaging.
+///
+/// Platform-integration point: real bindings queue a message on the
+/// device telephony stack behind this trait. The in-process stub
+/// reports [`HwError::Unavailable`].
 pub trait Texting {
-    /// Queue a text message locally for a contact. Stub: local-only
-    /// placeholder, no message is sent.
+    /// Queue a text message locally for a contact.
+    ///
+    /// Stub behavior: returns [`HwError::Unavailable`] — no message
+    /// is sent, and the stub never fakes success.
     fn send_text(&mut self, contact: &str, body: &str) -> Result<(), HwError>;
 }
 
 /// Native short-range proximity (e.g. NFC/BLE) for contact sharing
-/// and the ~1-mile local identity exchange. Stub only.
+/// and the ~1-mile local identity exchange.
+///
+/// Platform-integration point: real bindings drive the NFC/BLE
+/// radios behind this trait. The in-process stub reports
+/// [`HwError::Unavailable`] for `beacon`.
 pub trait Proximity {
-    /// Broadcast the local identity beacon natively. Stub: no-op.
+    /// Broadcast the local identity beacon natively.
+    ///
+    /// Stub behavior: returns [`HwError::Unavailable`] — nothing is
+    /// broadcast, and the stub never fakes success.
     fn beacon(&mut self) -> Result<(), HwError>;
     /// Whether a peer is in range. Stub: always false.
     fn peer_in_range(&self) -> bool;
@@ -123,7 +146,9 @@ impl Phone for NativeHwStub {
         if contact.is_empty() {
             return Err(HwError::InvalidRequest);
         }
-        Ok(())
+        // Platform-integration point: no telephony binding exists in
+        // the stub, so report unavailability instead of faking a call.
+        Err(HwError::Unavailable)
     }
 }
 
@@ -139,13 +164,18 @@ impl Texting for NativeHwStub {
         if contact.is_empty() || body.is_empty() {
             return Err(HwError::InvalidRequest);
         }
-        Ok(())
+        // Platform-integration point: no telephony binding exists in
+        // the stub, so report unavailability instead of faking a send.
+        Err(HwError::Unavailable)
     }
 }
 
 impl Proximity for NativeHwStub {
     fn beacon(&mut self) -> Result<(), HwError> {
-        Ok(())
+        // Platform-integration point: no NFC/BLE binding exists in
+        // the stub, so report unavailability instead of faking a
+        // broadcast.
+        Err(HwError::Unavailable)
     }
 
     fn peer_in_range(&self) -> bool {
@@ -198,7 +228,9 @@ mod tests {
     fn phone_and_texting_reject_empty_requests() {
         let mut stub = NativeHwStub::new();
         assert_eq!(stub.dial(""), Err(HwError::InvalidRequest));
-        assert!(stub.dial("555-0100").is_ok());
+        // Platform-integration points: no faked success — the stub
+        // reports the capability as unavailable.
+        assert_eq!(stub.dial("555-0100"), Err(HwError::Unavailable));
         assert_eq!(
             stub.send_text("", "hello"),
             Err(HwError::InvalidRequest)
@@ -207,7 +239,10 @@ mod tests {
             stub.send_text("555-0100", ""),
             Err(HwError::InvalidRequest)
         );
-        assert!(stub.send_text("555-0100", "hello").is_ok());
+        assert_eq!(
+            stub.send_text("555-0100", "hello"),
+            Err(HwError::Unavailable)
+        );
     }
 
     #[test]
@@ -215,7 +250,9 @@ mod tests {
         let mut stub = NativeHwStub::new();
         let (lat, lon) = stub.location().expect("stub location");
         assert_eq!((lat, lon), (0.0, 0.0));
-        assert!(stub.beacon().is_ok());
+        // The beacon is a platform-integration point: no faked
+        // success — the stub reports it as unavailable.
+        assert_eq!(stub.beacon(), Err(HwError::Unavailable));
         assert!(!stub.peer_in_range());
     }
 }

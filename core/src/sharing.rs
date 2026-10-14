@@ -9,6 +9,11 @@
 //! The check is pure local computation over a follower map supplied
 //! by the caller (e.g. the local on-device social graph) — no network
 //! I/O happens here.
+//!
+//! Handle comparison: handles are trimmed on construction
+//! ([`ShareRequest::new`]) and compared **case-sensitively** —
+//! `"Alice"` and `"alice"` are different viewers. Case-folding is a
+//! flagged future decision, deliberately not implemented here.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,6 +96,10 @@ impl ShareRequest {
     }
 
     /// Basic sanity check: handles must be non-empty and different.
+    ///
+    /// Handles are compared exactly as stored — trimmed, and
+    /// case-sensitive (`"Alice" != "alice"`). Case-folding is a
+    /// flagged future decision, not implemented here.
     pub fn validate(&self) -> Result<(), ShareError> {
         if self.from.is_empty() || self.to.is_empty() {
             return Err(ShareError::InvalidHandle);
@@ -107,6 +116,9 @@ impl ShareRequest {
     ///
     /// Missing map entries count as "follows nobody", so an unknown
     /// handle can never pass the gate.
+    ///
+    /// Lookup uses the trimmed, case-sensitive handles from
+    /// [`ShareRequest::new`].
     pub fn can_share(&self, follower_map: &HashMap<String, HashSet<String>>) -> bool {
         let empty: HashSet<String> = HashSet::new();
         let from_follows = follower_map.get(&self.from).unwrap_or(&empty);
@@ -175,5 +187,38 @@ mod tests {
         let followers = map(&[]);
         let req = ShareRequest::new("", "bob", PayloadType::Audio);
         assert_eq!(req.authorize(&followers), Err(ShareError::InvalidHandle));
+    }
+
+    #[test]
+    fn payload_type_labels_cover_every_variant() {
+        assert_eq!(PayloadType::Text.label(), "text");
+        assert_eq!(PayloadType::Media.label(), "media");
+        assert_eq!(PayloadType::File.label(), "file");
+        assert_eq!(PayloadType::Contact.label(), "contact");
+        assert_eq!(PayloadType::Audio.label(), "audio");
+    }
+
+    #[test]
+    fn share_error_labels_cover_every_variant() {
+        assert_eq!(ShareError::NotMutualFollow.label(), "not-mutual-follow");
+        assert_eq!(ShareError::SelfShare.label(), "self-share");
+        assert_eq!(ShareError::InvalidHandle.label(), "invalid-handle");
+    }
+
+    #[test]
+    fn handle_comparison_is_trimmed_and_case_sensitive() {
+        // Trimmed on construction...
+        let req = ShareRequest::new("  alice  ", "  bob  ", PayloadType::Text);
+        assert_eq!(req.from, "alice");
+        assert_eq!(req.to, "bob");
+        // ...but case is preserved, and lookup is case-sensitive:
+        // "Alice" does not match a map keyed under "alice".
+        let followers = map(&[("alice", &["bob"]), ("bob", &["alice"])]);
+        let cased = ShareRequest::new("Alice", "bob", PayloadType::Text);
+        assert!(!cased.can_share(&followers));
+        assert_eq!(
+            cased.authorize(&followers),
+            Err(ShareError::NotMutualFollow)
+        );
     }
 }

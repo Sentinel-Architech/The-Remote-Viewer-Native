@@ -25,6 +25,19 @@
 //! soulbound to the Network — it can be spent inside the Network
 //! but can never move to an outside wallet. Attempting to cash it
 //! out reduces it to dust. See [`AR_DUST_POLICY`].
+//!
+//! # Arithmetic policy
+//!
+//! Token math follows one rule: overflow that would be a bug is an
+//! *error*, and only documented capping is *saturating*.
+//!
+//! * Checked ops with [`WalletError`] on overflow: fee/quote math
+//!   ([`Wallet::outbound_platform_quote`]). A wrapped fee would
+//!   silently undercharge TRV, so overflow is a hard error.
+//! * Saturating ops where capping is the documented policy: balance
+//!   accumulation (`add_funds`, `buy_trv`, `earn_ar_tokens`,
+//!   [`Wallet::trv_tokens`]). A balance can never exceed `u64::MAX`;
+//!   the cap — not an error — is the documented behavior there.
 
 /// Basis points (1/100 of a percent) charged to TRV when TRV tokens
 /// are relocated to an outside wallet / another platform. User-decided
@@ -73,6 +86,10 @@ pub enum WalletError {
     InvalidAmount,
     /// Not enough of the asset to complete the operation.
     InsufficientFunds,
+    /// Arithmetic overflow in fee/quote math. Overflow there is a
+    /// bug (a wrapped fee would silently undercharge TRV), so it is
+    /// a hard error — not a silent wrap and not a cap.
+    ArithmeticOverflow,
 }
 
 impl WalletError {
@@ -81,6 +98,7 @@ impl WalletError {
         match self {
             WalletError::InvalidAmount => "invalid-amount",
             WalletError::InsufficientFunds => "insufficient-funds",
+            WalletError::ArithmeticOverflow => "arithmetic-overflow",
         }
     }
 }
@@ -293,17 +311,28 @@ impl Wallet {
     }
 
     /// Quote the fee TRV collects when purchased tokens relocate to
-    /// an outside wallet. Returns `(fee, net_to_wallet)`.
+    /// an outside wallet. Returns `Ok((fee, net_to_wallet))`.
     ///
     /// User-decided policy (2026-10-13): the fee is 25% of the moved
     /// amount, computed with integer math rounding down.
     ///
+    /// Arithmetic policy: the `tokens * TRANSFER_FEE_BPS` product is
+    /// computed with [`u64::checked_mul`]. Overflow is a bug here — a
+    /// wrapped fee would silently undercharge TRV — so it returns
+    /// [`WalletError::ArithmeticOverflow`] instead of wrapping or
+    /// saturating. The final subtraction cannot underflow (the fee is
+    /// at most 25% of `tokens`), so plain `-` is provably safe there.
+    ///
     /// This is a local policy computation only; no transfer happens
     /// here and no network is involved. Only purchased tokens can
     /// relocate, so quote the purchased portion.
-    pub fn outbound_platform_quote(tokens: u64) -> (u64, u64) {
-        let fee = tokens * u64::from(TRANSFER_FEE_BPS) / 10_000;
-        (fee, tokens.saturating_sub(fee))
+    pub fn outbound_platform_quote(tokens: u64) -> Result<(u64, u64), WalletError> {
+        let scaled = tokens
+            .checked_mul(u64::from(TRANSFER_FEE_BPS))
+            .ok_or(WalletError::ArithmeticOverflow)?;
+        let fee = scaled / 10_000;
+        // fee = floor(tokens * 2500 / 10000) <= tokens: no underflow.
+        Ok((fee, tokens - fee))
     }
 
     /// Transfer TRV tokens to an outside wallet.
@@ -338,7 +367,7 @@ impl Wallet {
         self.trv_purchased -= from_purchased;
         // Burned, not moved: AR-earned TRV can never leave the Network.
         self.trv_ar_earned -= from_ar;
-        let (fee, net) = Self::outbound_platform_quote(from_purchased);
+        let (fee, net) = Self::outbound_platform_quote(from_purchased)?;
         Ok(OutsideTransfer {
             dusted: from_ar,
             fee,
@@ -442,13 +471,42 @@ mod tests {
     #[test]
     fn transfer_fee_rounds_down_with_integer_math() {
         // 25% of 5 = 1.25 -> rounds down to 1.
-        let (fee, net) = Wallet::outbound_platform_quote(5);
+        let (fee, net) = Wallet::outbound_platform_quote(5).expect("small quote");
         assert_eq!(fee, 1);
         assert_eq!(net, 4);
         // 25% of 3 = 0.75 -> rounds down to 0.
-        let (fee, net) = Wallet::outbound_platform_quote(3);
+        let (fee, net) = Wallet::outbound_platform_quote(3).expect("small quote");
         assert_eq!(fee, 0);
         assert_eq!(net, 3);
+    }
+
+    #[test]
+    fn outbound_platform_quote_errors_on_overflow_instead_of_wrapping() {
+        // Regression: the old `tokens * TRANSFER_FEE_BPS` product
+        // wrapped (debug) / panicked on huge inputs. Overflow is a
+        // bug here, so it must be a hard error.
+        assert_eq!(
+            Wallet::outbound_platform_quote(u64::MAX),
+            Err(WalletError::ArithmeticOverflow)
+        );
+        assert_eq!(
+            Wallet::outbound_platform_quote(u64::MAX - 1),
+            Err(WalletError::ArithmeticOverflow)
+        );
+        assert_eq!(
+            WalletError::ArithmeticOverflow.label(),
+            "arithmetic-overflow"
+        );
+        // Boundary: the largest input whose product still fits.
+        let max_ok = u64::MAX / u64::from(TRANSFER_FEE_BPS);
+        let (fee, net) = Wallet::outbound_platform_quote(max_ok).expect("boundary fits");
+        assert_eq!(fee, max_ok * u64::from(TRANSFER_FEE_BPS) / 10_000);
+        assert_eq!(fee + net, max_ok);
+        // One more token tips the product over u64::MAX.
+        assert_eq!(
+            Wallet::outbound_platform_quote(max_ok + 1),
+            Err(WalletError::ArithmeticOverflow)
+        );
     }
 
     #[test]
@@ -577,7 +635,7 @@ mod tests {
         assert!(w.add_funds(100_000).is_ok());
         assert!(w.buy_trv(10_000, 10).is_ok());
         let tokens = 10_000u64;
-        let (fee, net) = Wallet::outbound_platform_quote(tokens);
+        let (fee, net) = Wallet::outbound_platform_quote(tokens).expect("small quote");
         let expected_fee = tokens * u64::from(TRANSFER_FEE_BPS) / 10_000;
         assert_eq!(TRANSFER_FEE_BPS, 2500, "fee is 25% per user policy");
         assert_eq!(fee, expected_fee);
