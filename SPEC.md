@@ -66,6 +66,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Not registered: 1 mile limit for all comms. Emergency = unlimited, no signal restrictions.
 - NFC: allow anything to be shared via NFC, but ONLY if actually following each other on the Network.
 - Customization: live account customization like Myspace (music etc.), but ENHANCED.
+- Faith glow (decided 2026-10-13): if a Remote Viewer goes to church or practices faith in some way, their profile lightly glows, growing stronger as they continue.
 - Creators get watermarks that can't be replaced. Remote Viewers who want to earn a living creating exclusively for TRV get 80% of what they sell.
 - Creator paywalls (confirmed 2026-10-13): creators can paywall their own content. Revenue split: 80% to creator, 20% to TRV.
 
