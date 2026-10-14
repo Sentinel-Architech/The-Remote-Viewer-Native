@@ -20,6 +20,7 @@
 - EVERYTHING HAPPENS ON DEVICE and NEVER over cell towers to transmit data — except Solana parts (see §10).
 - No outside services for NEWS, finances, medical records, or ANYTHING ELSE required by device. If it can be read or watched on a device, it's NATIVE.
 - Every aspect of The Remote Viewer Network to be FEDERALLY COMPLIANT, including HIPAA and ADA compliant system-wide, and encrypted per individual Remote Viewer.
+- Encryption in transit (decided 2026-10-13): all content is ENCRYPTED en route.
 - User retains full ownership. No human may claim ownership because their AI helped create an aspect.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
