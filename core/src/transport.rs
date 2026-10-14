@@ -14,18 +14,40 @@
 //! independent cryptographic audit. Do not rely on it for production
 //! secrets until that audit happens.
 //!
-//! ## Handshake (ephemeral-ephemeral, no static keys)
+//! ## Handshake
+//!
+//! Two flavors, same Diffie-Hellman core:
 //!
 //! ```text
 //! initiator -> responder:  32-byte ephemeral public key (hello)
 //! responder -> initiator:  32-byte ephemeral public key (response)
 //! ```
 //!
+//! **Unauthenticated** (`hello` / `finish` / `respond` / `establish`):
+//! anyone can substitute either message. An active attacker who swaps
+//! a hello completes the handshake themselves — the resulting channel
+//! is encrypted, but not with the intended peer. Use only for
+//! loopback/tests or where the peer is already trusted.
+//!
+//! **Authenticated** (`hello_auth` / `finish_auth` / `respond_auth` /
+//! `establish_auth`): each hello is a 128-byte blob —
+//! `eph_pub(32) || identity_pub(32) || sig(64)` — where `sig` is the
+//! sender's long-term Ed25519 identity key signing
+//! `eph_pub || recipient_identity_pub`. Each side pins the other's
+//! identity public key; a forged or substituted hello fails closed.
+//! Signing the recipient's identity into the blob also stops
+//! unknown-key-share attacks (a hello meant for one peer cannot be
+//! forwarded to another).
+//!
+//! Both flavors reject all-zero and low-order peer points before the
+//! key schedule (small-subgroup confinement), and reject an all-zero
+//! shared secret. Ephemeral secrets and the raw shared secret are
+//! wiped after use.
+//!
 //! Both sides compute `shared = X25519(eph_secret, peer_eph_public)`
 //! and derive identical session keys via HKDF-SHA512 over a
 //! transcript-bound info string (`b"TRV-TRANSPORT-v1" || e_init ||
-//! e_resp`). An all-zero peer key or an all-zero shared secret fails
-//! the handshake instead of producing a weak channel.
+//! e_resp`).
 //!
 //! ## Channel
 //!
@@ -39,7 +61,8 @@
 
 use crate::crypto::chacha20poly1305;
 use crate::crypto::ed25519::{
-    fe_add, fe_cmov, fe_frombytes, fe_inv, fe_mul, fe_sq, fe_sub, fe_tobytes, Fe,
+    self, fe_add, fe_cmov, fe_frombytes, fe_inv, fe_mul, fe_sq, fe_sub, fe_tobytes, Fe, PublicKey,
+    SecretKey, Signature,
 };
 use crate::crypto::pbkdf2::hmac_sha512;
 
@@ -50,9 +73,14 @@ pub enum TransportError {
     /// The OS CSPRNG (`/dev/urandom`) was unavailable. Fails closed
     /// rather than falling back to weak entropy.
     EntropyUnavailable,
-    /// Peer hello was all zeros, or the handshake produced an
-    /// all-zero shared secret (low-order/contributory failure).
+    /// Peer hello was all zeros or a low-order X25519 point, or the
+    /// handshake produced an all-zero shared secret (contributory
+    /// failure / small-subgroup confinement).
     BadPeerKey,
+    /// An authenticated hello/response failed identity verification:
+    /// wrong or unexpected identity key, bad signature, or malformed
+    /// blob. The handshake does not proceed.
+    IdentityAuthFailed,
     /// Frame is shorter than nonce (12) + tag (16).
     FrameTooShort,
     /// Poly1305 tag mismatch: wrong key, wrong nonce, tampered
@@ -73,6 +101,9 @@ impl std::fmt::Display for TransportError {
                 f.write_str("OS entropy unavailable; refusing to build a weak channel")
             }
             TransportError::BadPeerKey => f.write_str("bad peer key or degenerate shared secret"),
+            TransportError::IdentityAuthFailed => {
+                f.write_str("hello identity authentication failed (bad signature or unexpected identity)")
+            }
             TransportError::FrameTooShort => f.write_str("frame too short"),
             TransportError::AuthenticationFailed => {
                 f.write_str("frame authentication failed (wrong key or tampered data)")
@@ -220,10 +251,144 @@ const AAD_I2R: &[u8] = b"TRV-CHAN-v1:I2R";
 /// AAD binding the responder→initiator direction.
 const AAD_R2I: &[u8] = b"TRV-CHAN-v1:R2I";
 
-/// Reject an all-zero peer hello before it can produce a degenerate
-/// shared secret.
+/// Scalar for the low-order probe. X25519 clamping turns this into
+/// 2^254 + 8, a multiple of 8. For a peer point P whose order divides
+/// 8, `x25519(s, P)` is the identity (encoded as all zeros) for every
+/// clamped scalar s, because both 2^254 and 8 are multiples of 8 —
+/// while a legitimate full-order point never maps to zero here (its
+/// order shares no factor with 2^254 + 8 beyond the cofactor 8, which
+/// the clamped Diffie-Hellman already absorbs). This makes the probe
+/// exact: it flags precisely the points that would confine the
+/// session key, on the curve and on the twist alike.
+const ORDER_PROBE_SCALAR: [u8; 32] = {
+    let mut s = [0u8; 32];
+    s[0] = 8;
+    s
+};
+
+/// True if `peer` is a low-order X25519 point (order dividing 8).
+/// Such a point would confine the Diffie-Hellman output to a handful
+/// of attacker-known values (small-subgroup confinement, RFC 7748
+/// §5 considerations); it must never enter the key schedule.
+fn is_low_order(peer: &[u8; 32]) -> bool {
+    x25519(&ORDER_PROBE_SCALAR, peer) == [0u8; 32]
+}
+
+/// A device's long-term identity for handshake authentication: an
+/// Ed25519 keypair. The secret never leaves the device; the public is
+/// shared out-of-band (pinned, or learned from a previous trusted
+/// exchange) so each side knows exactly which identity to expect from
+/// the other.
+///
+/// Binding hellos to these keys is what stops an active attacker from
+/// swapping in their own ephemeral: without the peer's identity
+/// secret, the attacker cannot forge the signature, and the
+/// handshake fails closed with
+/// [`TransportError::IdentityAuthFailed`].
+pub struct IdentityKey {
+    secret: SecretKey,
+    public: PublicKey,
+}
+
+impl IdentityKey {
+    /// Wrap an existing Ed25519 keypair.
+    pub fn new(secret: SecretKey, public: PublicKey) -> Self {
+        Self { secret, public }
+    }
+
+    /// Derive an identity from a 32-byte seed (e.g. from
+    /// `/dev/urandom`, stored in the encrypted profile vault).
+    pub fn generate(seed: &[u8; 32]) -> Self {
+        let (secret, public) = ed25519::generate(seed);
+        Self { secret, public }
+    }
+
+    /// The public identity other peers pin or expect.
+    pub fn public(&self) -> &PublicKey {
+        &self.public
+    }
+}
+
+impl std::fmt::Debug for IdentityKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityKey")
+            .field("secret", &"<redacted>")
+            .field("public", &self.public)
+            .finish()
+    }
+}
+
+/// Length of an authenticated hello/response blob:
+/// `eph_pub(32) || identity_pub(32) || sig(64)`.
+pub const AUTH_HELLO_LEN: usize = 128;
+
+/// Build an authenticated hello/response blob: the ephemeral public,
+/// the signer's long-term identity public, and an Ed25519 signature
+/// over `eph_pub || peer_identity_pub`.
+///
+/// Signing the *intended recipient's* identity into the blob stops
+/// unknown-key-share attacks: a hello meant for one peer cannot be
+/// forwarded to another, because the signature is bound to the
+/// original recipient. Freshness comes from the ephemeral itself —
+/// each handshake mints a new one.
+fn auth_blob(eph: &[u8; 32], id: &IdentityKey, peer_id: &PublicKey) -> [u8; AUTH_HELLO_LEN] {
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(eph);
+    msg[32..].copy_from_slice(peer_id.as_bytes());
+    let sig = ed25519::sign(&id.secret, &id.public, &msg);
+    wipe(&mut msg);
+    let mut out = [0u8; AUTH_HELLO_LEN];
+    out[..32].copy_from_slice(eph);
+    out[32..64].copy_from_slice(id.public.as_bytes());
+    out[64..].copy_from_slice(sig.as_bytes());
+    out
+}
+
+/// Verify an authenticated hello/response blob. `expected_id` is the
+/// identity this side pinned for the peer; `own_id` is this side's
+/// own identity (it must appear as the signed recipient).
+///
+/// Returns the peer's ephemeral public on success. Any failure —
+/// wrong length is a caller bug (the slice type enforces it),
+/// unexpected identity, or bad signature — fails closed with
+/// [`TransportError::IdentityAuthFailed`]. The error is coarse on
+/// purpose: it reveals nothing about which check failed.
+fn verify_auth_blob(
+    blob: &[u8; AUTH_HELLO_LEN],
+    expected_id: &PublicKey,
+    own_id: &PublicKey,
+) -> Result<[u8; 32], TransportError> {
+    let mut eph = [0u8; 32];
+    eph.copy_from_slice(&blob[..32]);
+    let mut claimed_bytes = [0u8; 32];
+    claimed_bytes.copy_from_slice(&blob[32..64]);
+    let claimed = PublicKey::from_bytes(claimed_bytes);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(&blob[64..]);
+    let sig = Signature::from_bytes(sig_bytes);
+    // The peer must present exactly the identity we pinned for them.
+    if claimed.as_bytes() != expected_id.as_bytes() {
+        return Err(TransportError::IdentityAuthFailed);
+    }
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(&eph);
+    msg[32..].copy_from_slice(own_id.as_bytes());
+    let ok = ed25519::verify(&claimed, &msg, &sig);
+    wipe(&mut msg);
+    if !ok {
+        return Err(TransportError::IdentityAuthFailed);
+    }
+    Ok(eph)
+}
+
+/// Reject an all-zero peer hello and any low-order peer point before
+/// either can reach the key schedule. Both failures report the same
+/// coarse [`TransportError::BadPeerKey`].
 fn check_peer_key(peer: &[u8; 32]) -> Result<(), TransportError> {
     if peer == &[0u8; 32] {
+        return Err(TransportError::BadPeerKey);
+    }
+    if is_low_order(peer) {
         return Err(TransportError::BadPeerKey);
     }
     Ok(())
@@ -436,17 +601,54 @@ impl InitiatorHandshake {
     }
 
     /// The 32-byte hello to send the responder.
+    ///
+    /// Unauthenticated: any active attacker can substitute their own
+    /// hello (see [`InitiatorHandshake::hello_auth`]). Use only where
+    /// the peer is already trusted or for tests.
     pub fn hello(&self) -> [u8; 32] {
         self.public
     }
 
+    /// Build the authenticated hello blob ([`AUTH_HELLO_LEN`] bytes)
+    /// for `peer_id`: the ephemeral public, this device's identity
+    /// public, and an Ed25519 signature binding the ephemeral to the
+    /// intended recipient. The responder must pin this device's
+    /// identity and pass it as `expected_id`.
+    pub fn hello_auth(&self, id: &IdentityKey, peer_id: &PublicKey) -> [u8; AUTH_HELLO_LEN] {
+        auth_blob(&self.public, id, peer_id)
+    }
+
     /// Complete the handshake with the responder's 32-byte response,
     /// returning the initiator's [`Channel`].
+    ///
+    /// Unauthenticated: pair with [`InitiatorHandshake::hello`]; see
+    /// [`InitiatorHandshake::finish_auth`] for the MITM-safe variant.
     pub fn finish(mut self, peer_response: &[u8; 32]) -> Result<Channel, TransportError> {
         check_peer_key(peer_response)?;
-        let shared = x25519(&self.secret, peer_response);
+        let mut shared = x25519(&self.secret, peer_response);
         wipe(&mut self.secret);
-        derive_channels(&shared, &self.public, peer_response, true)
+        let channel = derive_channels(&shared, &self.public, peer_response, true);
+        wipe(&mut shared);
+        channel
+    }
+
+    /// Complete the handshake with the responder's authenticated
+    /// response blob. `expected_id` is the responder's pinned
+    /// identity; `own_id` is this device's identity (it must appear
+    /// as the signed recipient of the response).
+    ///
+    /// Fails closed with [`TransportError::IdentityAuthFailed`] if the
+    /// response is not authentically from `expected_id`, or with
+    /// [`TransportError::BadPeerKey`] on a degenerate/low-order peer
+    /// point.
+    pub fn finish_auth(
+        self,
+        peer_response: &[u8; AUTH_HELLO_LEN],
+        expected_id: &PublicKey,
+        own_id: &PublicKey,
+    ) -> Result<Channel, TransportError> {
+        let eph = verify_auth_blob(peer_response, expected_id, own_id)?;
+        self.finish(&eph)
     }
 }
 
@@ -482,30 +684,80 @@ impl ResponderHandshake {
 
     /// Process the initiator's 32-byte hello. Returns the
     /// responder's [`Channel`] and the 32-byte response to send back.
+    ///
+    /// Unauthenticated: pair with [`ResponderHandshake::respond`];
+    /// see [`ResponderHandshake::respond_auth`] for the MITM-safe
+    /// variant.
     pub fn respond(
         mut self,
         peer_hello: &[u8; 32],
     ) -> Result<(Channel, [u8; 32]), TransportError> {
         check_peer_key(peer_hello)?;
-        let shared = x25519(&self.secret, peer_hello);
+        let mut shared = x25519(&self.secret, peer_hello);
         wipe(&mut self.secret);
-        let channel = derive_channels(&shared, peer_hello, &self.public, false)?;
+        let channel = derive_channels(&shared, peer_hello, &self.public, false);
+        wipe(&mut shared);
+        let channel = channel?;
         Ok((channel, self.public))
+    }
+
+    /// Process the initiator's authenticated hello blob.
+    /// `expected_id` is the initiator's pinned identity; `id` is this
+    /// device's identity (used to sign the response, bound to the
+    /// initiator as recipient).
+    ///
+    /// Fails closed with [`TransportError::IdentityAuthFailed`] if the
+    /// hello is not authentically from `expected_id`, or with
+    /// [`TransportError::BadPeerKey`] on a degenerate/low-order peer
+    /// point.
+    pub fn respond_auth(
+        self,
+        peer_hello: &[u8; AUTH_HELLO_LEN],
+        expected_id: &PublicKey,
+        id: &IdentityKey,
+    ) -> Result<(Channel, [u8; AUTH_HELLO_LEN]), TransportError> {
+        let eph = verify_auth_blob(peer_hello, expected_id, id.public())?;
+        let (channel, response_eph) = self.respond(&eph)?;
+        let response = auth_blob(&response_eph, id, expected_id);
+        Ok((channel, response))
     }
 }
 
 /// Run both handshake roles in-process. Returns
 /// `(initiator_channel, responder_channel)`.
 ///
-/// Convenience for loopback use and tests; over a real link, send
-/// [`InitiatorHandshake::hello`] and the responder's response bytes
-/// between the two sides instead.
+/// Unauthenticated: convenience for loopback use and tests; over a
+/// real link, send [`InitiatorHandshake::hello`] and the responder's
+/// response bytes between the two sides instead. An active attacker
+/// can substitute either message — use [`establish_auth`] (or the
+/// `*_auth` methods) whenever the peer's identity is known.
 pub fn establish() -> Result<(Channel, Channel), TransportError> {
     let init = InitiatorHandshake::new()?;
     let resp = ResponderHandshake::new()?;
     let hello = init.hello();
     let (rchan, response) = resp.respond(&hello)?;
     let ichan = init.finish(&response)?;
+    Ok((ichan, rchan))
+}
+
+/// Run both handshake roles in-process with mutual identity
+/// authentication. `id_init`/`id_resp` are the two devices' long-term
+/// identities; each side pins the other's public key.
+///
+/// This is the variant to use on real links: the hellos are signed by
+/// the long-term identity keys, so a man in the middle cannot
+/// substitute their own ephemeral without failing
+/// [`TransportError::IdentityAuthFailed`], and low-order peer points
+/// are rejected before they reach the key schedule.
+pub fn establish_auth(
+    id_init: &IdentityKey,
+    id_resp: &IdentityKey,
+) -> Result<(Channel, Channel), TransportError> {
+    let init = InitiatorHandshake::new()?;
+    let resp = ResponderHandshake::new()?;
+    let hello = init.hello_auth(id_init, id_resp.public());
+    let (rchan, response) = resp.respond_auth(&hello, id_init.public(), id_resp)?;
+    let ichan = init.finish_auth(&response, id_resp.public(), id_init.public())?;
     Ok((ichan, rchan))
 }
 
@@ -528,6 +780,155 @@ mod tests {
 
     fn arr32(v: &[u8]) -> [u8; 32] {
         v.try_into().unwrap()
+    }
+
+    #[test]
+    fn low_order_peer_point_rejected() {
+        // u = 1 is a genuine low-order X25519 point (order dividing 8;
+        // verified 2026-10-14: the order probe maps it to the identity).
+        // Accepting it would confine the session key to
+        // attacker-known values. Both handshake roles must reject it,
+        // on the plain and the authenticated paths alike.
+        let mut low = [0u8; 32];
+        low[0] = 1;
+        assert!(is_low_order(&low));
+
+        let init = InitiatorHandshake::new().unwrap();
+        assert_eq!(
+            init.finish(&low).unwrap_err(),
+            TransportError::BadPeerKey
+        );
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond(&low).unwrap_err(),
+            TransportError::BadPeerKey
+        );
+
+        // A legitimate ephemeral public is not low-order and still
+        // handshakes fine.
+        let legit = InitiatorHandshake::new().unwrap().hello();
+        assert!(!is_low_order(&legit));
+        let init = InitiatorHandshake::new().unwrap();
+        let resp = ResponderHandshake::new().unwrap();
+        let (mut rchan, response) = resp.respond(&init.hello()).unwrap();
+        let mut ichan = init.finish(&response).unwrap();
+        let frame = ichan.seal(b"ok").unwrap();
+        assert_eq!(rchan.open(&frame).unwrap(), b"ok");
+
+        // The authenticated path rejects it too.
+        let id_a = IdentityKey::generate(&[0xA1u8; 32]);
+        let id_b = IdentityKey::generate(&[0xB2u8; 32]);
+        let init = InitiatorHandshake::new().unwrap();
+        let blob = init.hello_auth(&id_a, id_b.public());
+        // Swap the ephemeral inside the blob for the low-order point
+        // and re-sign with the *attacker's* key is impossible — but a
+        // bit-flip that lands on a low-order ephemeral must still fail
+        // closed at the DH step even if the signature somehow passed.
+        // Here we check the direct gate instead:
+        let resp = ResponderHandshake::new().unwrap();
+        let mut evil_blob = blob;
+        evil_blob[..32].copy_from_slice(&low);
+        // Signature no longer matches the tampered ephemeral.
+        assert_eq!(
+            resp.respond_auth(&evil_blob, id_a.public(), &id_b)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+    }
+
+    #[test]
+    fn mitm_hello_rejected_on_authenticated_handshake() {
+        // The core MITM scenario: an active attacker intercepts the
+        // initiator's hello and substitutes their own ephemeral. On
+        // the authenticated handshake the substitution must fail,
+        // because the attacker cannot forge the initiator's identity
+        // signature.
+        let id_init = IdentityKey::generate(&[0x11u8; 32]);
+        let id_resp = IdentityKey::generate(&[0x22u8; 32]);
+        let id_evil = IdentityKey::generate(&[0x33u8; 32]);
+
+        let init = InitiatorHandshake::new().unwrap();
+        let hello = init.hello_auth(&id_init, id_resp.public());
+
+        // Attacker builds their own hello, signed with the ATTACKER's
+        // identity key, and swaps it in.
+        let evil_eph = InitiatorHandshake::new().unwrap();
+        let evil_hello = evil_eph.hello_auth(&id_evil, id_resp.public());
+
+        // Responder pinned the real initiator's identity: the evil
+        // hello is rejected.
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond_auth(&evil_hello, id_init.public(), &id_resp)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+
+        // Even if the attacker replays the initiator's *genuine* blob
+        // but the responder expects a different identity, it fails.
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond_auth(&hello, id_evil.public(), &id_resp)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+
+        // The genuine handshake still completes and chats both ways.
+        let (mut ichan, mut rchan) = establish_auth(&id_init, &id_resp).unwrap();
+        let frame = ichan.seal(b"authenticated").unwrap();
+        assert_eq!(rchan.open(&frame).unwrap(), b"authenticated");
+        let frame = rchan.seal(b"mutual").unwrap();
+        assert_eq!(ichan.open(&frame).unwrap(), b"mutual");
+    }
+
+    #[test]
+    fn tampered_identity_signature_rejected() {
+        let id_init = IdentityKey::generate(&[0x44u8; 32]);
+        let id_resp = IdentityKey::generate(&[0x55u8; 32]);
+        let init = InitiatorHandshake::new().unwrap();
+        let hello = init.hello_auth(&id_init, id_resp.public());
+
+        // Tamper the signature bytes.
+        let mut t1 = hello;
+        t1[100] ^= 0x01;
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond_auth(&t1, id_init.public(), &id_resp)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+
+        // Tamper the ephemeral bytes (signature was over the original).
+        let mut t2 = hello;
+        t2[7] ^= 0x80;
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond_auth(&t2, id_init.public(), &id_resp)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+
+        // Tamper the claimed identity bytes.
+        let mut t3 = hello;
+        t3[40] ^= 0x04;
+        let resp = ResponderHandshake::new().unwrap();
+        assert_eq!(
+            resp.respond_auth(&t3, id_init.public(), &id_resp)
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
+
+        // Tamper the responder's reply in flight to the initiator.
+        let init = InitiatorHandshake::new().unwrap();
+        let resp = ResponderHandshake::new().unwrap();
+        let hello = init.hello_auth(&id_init, id_resp.public());
+        let (_rchan, mut response) = resp.respond_auth(&hello, id_init.public(), &id_resp).unwrap();
+        response[70] ^= 0x02;
+        assert_eq!(
+            init.finish_auth(&response, id_resp.public(), id_init.public())
+                .unwrap_err(),
+            TransportError::IdentityAuthFailed
+        );
     }
 
     #[test]
