@@ -379,6 +379,12 @@ struct Snap {
 }
 
 unsafe fn android_main(shared: *mut Shared) {
+    // Best-effort: refresh the widget's data file so the home-screen
+    // widget shows live numbers. Fails silently (returns false) on any
+    // error — the widget falls back to its baked-in snapshot — and never
+    // panics, so startup can't break here.
+    crate::widget::write_widget_snapshot();
+
     let mut fds = [0 as c_int; 2];
     if pipe(fds.as_mut_ptr()) != 0 {
         // No wake pipe, no loop: uninstall everything and bail instead

@@ -23,7 +23,7 @@ public class TrvWidgetProvider extends AppWidgetProvider {
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager,
                          int[] appWidgetIds) {
-        TrvWidgetData.Snapshot s = TrvWidgetData.snapshot();
+        TrvWidgetData.Snapshot s = TrvWidgetData.snapshot(context);
         for (int appWidgetId : appWidgetIds) {
             updateWidget(context, appWidgetManager, appWidgetId, s);
         }

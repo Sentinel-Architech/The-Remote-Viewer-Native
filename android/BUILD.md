@@ -194,7 +194,7 @@ javac -source 8 -target 8 -cp "$AJAR" -d /tmp/java_classes \
 "$BT/aapt2" link -o /tmp/base.apk -I "$AJAR" \
   --manifest android/AndroidManifest.xml \
   --min-sdk-version 26 --target-sdk-version 34 \
-  -A /tmp/compiled_res.zip --java /tmp/gen
+  --java /tmp/gen /tmp/compiled_res.zip
 
 # 4. Add native libs AND classes.dex before zipalign
 mkdir -p /tmp/apk/lib/arm64-v8a
