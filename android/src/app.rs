@@ -37,6 +37,42 @@ const LOOPER_ID_CMD: c_int = 2;
 /// Command byte sent through the wake pipe.
 const CMD_DESTROY: u8 = 1;
 
+/// TRV receipt-issuer public key.
+///
+/// PLACEHOLDER — this is not a real issuer key and MUST be replaced with
+/// the genuine TRV issuer public key before the app accepts any real
+/// receipt. Until then every receipt fails verification, entitlements
+/// stay `None`, and the paywall gates deny (fail closed).
+const ISSUER_PUBKEY: [u8; 32] = [0u8; 32];
+
+/// Read the app's internal data directory from the activity.
+///
+/// Returns `None` when the activity pointer or the path itself is null,
+/// or when the path is not valid UTF-8 — the caller then treats the
+/// entitlement as absent (gates deny).
+unsafe fn data_path(activity: *mut ANativeActivity) -> Option<std::path::PathBuf> {
+    if activity.is_null() {
+        return None;
+    }
+    let raw = (*activity).internal_data_path;
+    if raw.is_null() {
+        return None;
+    }
+    let s = std::ffi::CStr::from_ptr(raw).to_str().ok()?;
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Load the stored entitlement for this install.
+///
+/// Any failure — no receipt file, unreadable file, forged receipt,
+/// expired receipt — yields `None`, and the UI gates fail closed.
+fn load_entitlement_for(activity: *mut ANativeActivity) -> Option<trv_backend::entitlement::Entitlement> {
+    // SAFETY: `activity` is the valid, never-changing activity pointer
+    // snapshotted from shared state; we only read the path field.
+    let dir = unsafe { data_path(activity) }?;
+    crate::entitlement::load_entitlement(&dir, &ISSUER_PUBKEY)
+}
+
 /// Shared between the main thread (callbacks) and the app thread.
 struct Shared {
     looper: AtomicPtr<ALooper>,
@@ -422,6 +458,11 @@ unsafe fn android_main(shared: *mut Shared) {
 
     // `activity` never changes after onCreate; snapshot it once.
     let activity = lock_state(shared).activity;
+
+    // Paywall: verify the stored receipt (if any). No receipt, a forged
+    // receipt, or an expired receipt → None → the UnlimitedEi and
+    // messaging gates deny (fail closed).
+    ui.screen.set_entitlement(load_entitlement_for(activity));
 
     {
         let mut st = lock_state(shared);

@@ -10,3 +10,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 trv-ui = { path = "../ui" }
+trv-backend = { path = "../backend" }
+trv-core = { path = "../core" }
