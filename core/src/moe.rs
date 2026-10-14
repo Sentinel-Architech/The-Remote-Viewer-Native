@@ -1,6 +1,6 @@
 //! On-device Mixture-of-Experts router.
 //!
-//! Mirrors `grok/router` + the 11 skills in the main repo. Routing is
+//! Routes queries to the 11 on-device expert skills. Routing is
 //! keyword-based and fully deterministic: no model weights, no cloud,
 //! no I/O. All routing is local — nothing ever touches the network.
 
@@ -38,7 +38,7 @@ impl ExpertSkill {
         ]
     }
 
-    /// Canonical skill name (matches `grok/skills/<name>`).
+    /// Canonical skill name (kebab-case, stable across releases).
     pub fn name(self) -> &'static str {
         match self {
             ExpertSkill::CognitiveScience => "cognitive-science",

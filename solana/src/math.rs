@@ -35,7 +35,7 @@ pub fn fee_bps(amount: u64, bps: u32) -> Result<u64, MathError> {
     }
     let fee = (amount as u128)
         .checked_mul(bps as u128)
-        .expect("u128 cannot overflow for u64 * u32")
+        .ok_or(MathError::Overflow)?
         / 10_000;
     u64::try_from(fee).map_err(|_| MathError::Overflow)
 }
@@ -43,7 +43,7 @@ pub fn fee_bps(amount: u64, bps: u32) -> Result<u64, MathError> {
 /// Split `amount` into `(fee, net)` for the given basis points.
 pub fn split_fee(amount: u64, bps: u32) -> Result<(u64, u64), MathError> {
     let fee = fee_bps(amount, bps)?;
-    let net = amount.checked_sub(fee).expect("fee <= amount");
+    let net = amount.checked_sub(fee).ok_or(MathError::Overflow)?;
     Ok((fee, net))
 }
 

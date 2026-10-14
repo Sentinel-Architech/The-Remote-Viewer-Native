@@ -172,7 +172,10 @@ fn get_str(data: &[u8], pos: &mut usize) -> Result<String, VaultError> {
     if *pos + 2 > data.len() {
         return Err(VaultError::Corrupt("truncated field length".into()));
     }
-    let len = u16::from_le_bytes(data[*pos..*pos + 2].try_into().unwrap()) as usize;
+    let len_bytes: [u8; 2] = data[*pos..*pos + 2]
+        .try_into()
+        .map_err(|_| VaultError::Corrupt("truncated field length".into()))?;
+    let len = u16::from_le_bytes(len_bytes) as usize;
     *pos += 2;
     if len > MAX_FIELD_LEN {
         return Err(VaultError::Corrupt("field length absurd".into()));

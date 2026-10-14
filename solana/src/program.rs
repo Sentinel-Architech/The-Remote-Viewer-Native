@@ -17,6 +17,7 @@
 //! | `Clock::get()`              | `now` parameter (unix seconds; injected, never read here) |
 //! | `Signer` checks             | `is_signer` flags on [`Accounts`]                      |
 
+use crate::math::MathError;
 use crate::staking::{self, StakeAccount, StakingError};
 use crate::token::{MintError, MintState};
 use crate::transfer_hook::{self, TransferHookError, TransferReceipt, TransferRequest};
@@ -92,6 +93,8 @@ pub enum ProgramError {
     Token(MintError),
     Hook(TransferHookError),
     Staking(StakingError),
+    /// Checked arithmetic failed (e.g. treasury balance overflow).
+    Math(MathError),
     /// Required account was not provided.
     MissingAccount(&'static str),
     /// Instruction needs a signer and none signed.
@@ -104,6 +107,7 @@ impl fmt::Display for ProgramError {
             ProgramError::Token(e) => write!(f, "token: {e}"),
             ProgramError::Hook(e) => write!(f, "transfer hook: {e}"),
             ProgramError::Staking(e) => write!(f, "staking: {e}"),
+            ProgramError::Math(e) => write!(f, "math: {e}"),
             ProgramError::MissingAccount(name) => write!(f, "missing account: {name}"),
             ProgramError::MissingSignature => write!(f, "instruction requires a signer"),
         }
@@ -152,7 +156,7 @@ pub fn process_instruction(
                 treasury.balance = treasury
                     .balance
                     .checked_add(receipt.fee)
-                    .expect("treasury balance cannot realistically overflow u64");
+                    .ok_or(ProgramError::Math(MathError::Overflow))?;
             }
             Ok(InstructionOutput::Transfer(receipt))
         }
@@ -264,6 +268,28 @@ mod tests {
             _ => panic!("wrong output"),
         }
         assert_eq!(treasury.balance, 250);
+    }
+
+    #[test]
+    fn treasury_overflow_returns_error_not_panic() {
+        let mut mint = MintAccount { state: MintState::initialize([1u8; 32]) };
+        let mut stake = StakeAccountRecord { stake: StakeAccount::empty() };
+        let mut treasury = TreasuryRecord { balance: u64::MAX };
+        let mut accts = accounts(&mut mint, &mut stake, &mut treasury);
+
+        let err = process_instruction(
+            Instruction::TransferWithHook(TransferRequest {
+                amount: 1_000,
+                from: WalletKind::Network,
+                to: WalletKind::Outside,
+                ar_earned: false,
+            }),
+            &mut accts,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::Math(MathError::Overflow));
+        // Balance untouched on failure.
+        assert_eq!(treasury.balance, u64::MAX);
     }
 
     #[test]
