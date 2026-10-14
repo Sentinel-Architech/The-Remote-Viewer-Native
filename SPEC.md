@@ -139,6 +139,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Reference: `apps/hub/src/lib/trv/hydra.ts` in main repo.
 - Exploitation response (decided 2026-10-13): if a pedophile attempts to exploit, the attempt is immediately geo-located and sent to authorities.
 - **Active defense** (from early drafts, decided 2026-10-13): Hydra detects, diverts, and scrambles attacker data on the intruder's own device, with on-device AI catching a single harmful data flow before damage occurs. **LEGAL CAVEAT**: counter-strikes are of questionable legality under international law — requires legal review before implementation. (Policy only; no implementation.)
+- HYDRA incident lifecycle (decided 2026-10-14): HYDRA reporting follows the NIST SP 800-61 incident response lifecycle — (1) Preparation: Sentinel monitoring and on-device readiness; (2) Detection & Analysis: native spy detection, evidence hashing, sealed original stays on-device; (3) Containment, Eradication & Recovery: isolate the threat, censored outbound packet to authorities, optional coarse location; (4) Post-Incident Activity: audit trail and delivery/quarantine integrity gate.
 
 ## 12. Token Pool (from GH TOKENOMICS, to confirm)
 - Digital / NFT primary: 80% creator, 10% pool, 10% platform (per TOKENOMICS.md).
