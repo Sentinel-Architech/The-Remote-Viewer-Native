@@ -97,6 +97,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Artist NFT flow (decided 2026-10-13): an artist can take a picture with the TRV camera, use TRV art skills to create a one-of-a-kind NFT incorporating the picture, and sell it. Artists are rewarded in small ways for keeping content exclusively on TRV (specific rewards TBD).
 - Founding Members: get 100% everything UNLIMITED if they've gone through GH to manually install (via dev mode terminal commands).
 - Ads policy (decided 2026-10-13): Ghost tier gets native ads at 15 seconds per minute watched. No other tier gets ads. Native ads are served on-device, not via corporate ad networks.
+- Invite system (decided 2026-10-13): users can give UNLIMITED invites to friends and others. Invitees get 15 days of unlimited access free, then drop to ghost tier until they verify ID and pay for a tier.
 
 ## 9. Install — One Tap
 - No one should NEED a terminal, not even the user themselves.
