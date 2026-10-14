@@ -4,7 +4,9 @@
 //! Solana is the separate track, only for TRV token/governance.
 
 use crate::entitlement;
+use crate::entitlement::Entitlement;
 use crate::entitlement::EntitlementError;
+use std::path::Path;
 
 /// Seconds in a 30-day billing month.
 pub const MONTH_SECS: u64 = 30 * 86_400;
@@ -704,6 +706,328 @@ pub fn receipt_active_at(
     Ok(ent.tier())
 }
 
+// ---------------------------------------------------------------------------
+// Billing tick: the scheduled job that actually collects ghost fees
+// ---------------------------------------------------------------------------
+
+/// Grace period after a paid subscription expires before ghost
+/// escalation begins: 3 days. During grace the viewer keeps full
+/// access and sees a renewal warning; no ghost fees accrue.
+pub const SUBSCRIPTION_GRACE_DAYS: u64 = 3;
+/// Seconds in the subscription grace period.
+pub const SUBSCRIPTION_GRACE_SECS: u64 = SUBSCRIPTION_GRACE_DAYS * 86_400;
+/// Minimum interval between daily billing ticks: 20 hours. A tick
+/// requested sooner is a no-op, so a crash-loop or double scheduler
+/// can never double-bill.
+pub const DAILY_TICK_MIN_SECS: u64 = 20 * 3_600;
+
+/// What a billing tick did.
+///
+/// `ran` is false when the daily tick was skipped as too soon —
+///
+/// everything else is zero in that case. `total_cents` is `None`
+/// only when settlement itself failed (fail closed); the pool is
+/// untouched then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickOutcome {
+    /// Whether the tick executed settlement (false = skipped as too soon).
+    pub ran: bool,
+    /// Billing months collected by this tick.
+    pub months_collected: u64,
+    /// Total cents collected by this tick.
+    pub total_cents: u64,
+    /// Pool balance in cents after the tick.
+    pub pool_balance_cents: u64,
+}
+
+/// The billing tick: the app's scheduled job that turns ghost
+/// escalation from math into money.
+///
+/// Caller contract (this is THE enforcement point the paywall audit
+/// asked for):
+///
+/// 1. On app startup, load the persisted [`GhostLedger`] (see
+///    [`GhostLedger::load`]), call
+///    [`BillingTick::tick_at_startup`], then
+///    [`GhostLedger::save`] the ledger — even when nothing was due,
+///    so a fresh install's ledger is durable from day one.
+/// 2. Once per day (alarm, job scheduler, or a foreground check),
+///    call [`BillingTick::tick_daily`] with the last-run timestamp;
+///    it no-ops when under 20 hours have passed.
+/// 3. The ledger file lives at `<app_data_dir>/ghost_ledger.trvl`.
+///    It holds no secrets (timestamps and month counts only), so it
+///    is not encrypted — but a corrupt file fails closed and the app
+///    must surface the error, never silently reset billing.
+///
+/// No real payment processing happens here: ghost fees are internal
+/// ledger movements into the [`CommunityPool`]. Actual money movement
+/// is out of scope for this module.
+pub struct BillingTick;
+
+impl BillingTick {
+    /// Run the billing tick at app startup: settle every uncollected
+    /// ghost month through `now` into the pool.
+    ///
+    /// Idempotent: running twice for the same `now` collects nothing
+    /// the second time. Returns `None` when settlement fails closed
+    /// (overflow) — the pool and ledger are untouched; the app must
+    /// retry later.
+    pub fn tick_at_startup(
+        ledger: &mut GhostLedger,
+        pool: &mut CommunityPool,
+        now: u64,
+    ) -> Option<TickOutcome> {
+        let before = ledger.months_collected();
+        let total = ledger.settle(pool, now)?;
+        Some(TickOutcome {
+            ran: true,
+            months_collected: ledger.months_collected() - before,
+            total_cents: total,
+            pool_balance_cents: pool.balance_cents(),
+        })
+    }
+
+    /// Run the daily billing tick. When fewer than
+    /// [`DAILY_TICK_MIN_SECS`] have passed since `last_run`, this is a
+    /// no-op returning `ran: false` — the pool and ledger are untouched.
+    /// Otherwise it behaves exactly like
+    /// [`BillingTick::tick_at_startup`].
+    ///
+    /// `last_run = 0` (never ran) always executes. Clock skew where
+    /// `now < last_run` saturates to 0 elapsed and no-ops, fail closed.
+    pub fn tick_daily(
+        ledger: &mut GhostLedger,
+        pool: &mut CommunityPool,
+        now: u64,
+        last_run: u64,
+    ) -> Option<TickOutcome> {
+        if now.saturating_sub(last_run) < DAILY_TICK_MIN_SECS {
+            return Some(TickOutcome {
+                ran: false,
+                months_collected: 0,
+                total_cents: 0,
+                pool_balance_cents: pool.balance_cents(),
+            });
+        }
+        Self::tick_at_startup(ledger, pool, now)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ghost ledger persistence
+// ---------------------------------------------------------------------------
+
+/// Magic bytes for the ledger file.
+const LEDGER_MAGIC: &[u8; 4] = b"TRVG";
+/// Ledger file format version.
+const LEDGER_VERSION: u8 = 1;
+/// Exact file length: magic(4) + version(1) + ghost_since(8) + months_collected(8).
+const LEDGER_FILE_LEN: usize = 21;
+
+/// Errors from ghost-ledger persistence.
+///
+/// Fail closed: a corrupt ledger never silently resets someone's
+/// billing — the app must surface the error and the operator must
+/// intervene.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerError {
+    /// Filesystem failure (read, stage, or rename).
+    Io(String),
+    /// Bad magic or wrong length: not a ledger file, or torn.
+    Corrupt(String),
+    /// Version byte is not one this build understands.
+    UnsupportedVersion(u8),
+}
+
+impl core::fmt::Display for LedgerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LedgerError::Io(e) => write!(f, "ghost ledger io: {e}"),
+            LedgerError::Corrupt(e) => write!(f, "ghost ledger corrupt: {e}"),
+            LedgerError::UnsupportedVersion(v) => {
+                write!(f, "ghost ledger: unsupported version {v}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LedgerError {}
+
+/// Atomic temp-file write for the ledger: stage next to the target,
+/// fsync, rename over it. Same pattern as the profile vault's
+/// `atomic_write`, kept local so this module stays self-contained.
+/// On any failure the temp is removed and the old ledger is untouched.
+fn atomic_write_ledger(path: &Path, bytes: &[u8]) -> Result<(), LedgerError> {
+    let mut tmp_name = path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let staged = (|| -> std::io::Result<()> {
+        std::fs::write(&tmp, bytes)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(LedgerError::Io(format!("ledger stage failed: {e}")));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        LedgerError::Io(format!("ledger commit failed: {e}"))
+    })
+}
+
+impl GhostLedger {
+    /// Persist the ledger to `path` atomically.
+    ///
+    /// The file holds NO secrets — only the ghost-start timestamp and
+    /// collected-month count — so it is deliberately not encrypted.
+    /// What it holds is billing truth, so writes are atomic: readers
+    /// see the complete old ledger or the complete new one, never a
+    /// torn write.
+    pub fn save(&self, path: &Path) -> Result<(), LedgerError> {
+        let mut buf = Vec::with_capacity(LEDGER_FILE_LEN);
+        buf.extend_from_slice(LEDGER_MAGIC);
+        buf.push(LEDGER_VERSION);
+        buf.extend_from_slice(&self.ghost.ghost_since().to_be_bytes());
+        buf.extend_from_slice(&self.months_collected.to_be_bytes());
+        atomic_write_ledger(path, &buf)
+    }
+
+    /// Load a persisted ledger. Fails closed on missing file
+    /// ([`LedgerError::Io`]), bad magic or length
+    /// ([`LedgerError::Corrupt`]), and unknown versions
+    /// ([`LedgerError::UnsupportedVersion`]) — never a silent reset.
+    pub fn load(path: &Path) -> Result<Self, LedgerError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| LedgerError::Io(format!("ledger read failed: {e}")))?;
+        if bytes.len() != LEDGER_FILE_LEN {
+            return Err(LedgerError::Corrupt(format!(
+                "expected {LEDGER_FILE_LEN} bytes, got {}",
+                bytes.len()
+            )));
+        }
+        if &bytes[0..4] != LEDGER_MAGIC {
+            return Err(LedgerError::Corrupt("bad magic".to_string()));
+        }
+        if bytes[4] != LEDGER_VERSION {
+            return Err(LedgerError::UnsupportedVersion(bytes[4]));
+        }
+        let mut gs = [0u8; 8];
+        gs.copy_from_slice(&bytes[5..13]);
+        let mut mc = [0u8; 8];
+        mc.copy_from_slice(&bytes[13..21]);
+        Ok(GhostLedger {
+            ghost: GhostAccount::new(u64::from_be_bytes(gs)),
+            months_collected: u64::from_be_bytes(mc),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Viewer-facing subscription status
+// ---------------------------------------------------------------------------
+
+/// What the UI shows for "your subscription".
+///
+/// This is the viewer-facing view; [`SubscriptionStatus`] remains the
+/// internal lifecycle enum. Name differs on purpose: the old name was
+/// taken and this one carries billing detail (tier, grace days, ghost
+/// fees) the UI needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerStatus {
+    /// Paid and valid: full access until `expires_at`.
+    Active {
+        /// Granted tier.
+        tier: Tier,
+        /// Unix seconds the entitlement lapses.
+        expires_at: u64,
+    },
+    /// Subscription expired within the last [`SUBSCRIPTION_GRACE_DAYS`]
+    /// days: features still work, the UI must show a renewal warning.
+    GracePeriod {
+        /// Whole days of grace remaining.
+        days_left: u64,
+    },
+    /// Past grace with no valid entitlement: ghost escalation applies.
+    Ghost {
+        /// Billing months elapsed but not yet collected.
+        months_unpaid: u64,
+        /// Fee in cents for the next uncollected month (0 when none due).
+        next_fee_cents: u32,
+    },
+    /// No valid entitlement and no ghost billing relationship: dormant.
+    /// The viewer must purchase or verify to get going; nothing is billed.
+    Lapsed,
+}
+
+/// Compute the viewer-facing status from an entitlement (or `None`
+/// for a viewer who never paid) and the ghost ledger.
+///
+/// Ghost-clock contract: for a never-paid viewer the ledger's
+/// `ghost_since` is account creation. For an expired paid viewer the
+/// app must track ghost billing with a ledger whose `ghost_since` is
+/// `expires_at + SUBSCRIPTION_GRACE_SECS` — i.e. the ghost clock
+/// starts when the 3-day grace ends, not at expiry.
+///
+/// Pass `ledger: None` when no ghost billing relationship exists for
+/// this viewer; an expired entitlement with no ledger reports
+/// [`ViewerStatus::Lapsed`] instead of [`ViewerStatus::Ghost`].
+pub fn viewer_status(
+    ent: Option<Entitlement>,
+    ledger: Option<&GhostLedger>,
+    now: u64,
+) -> ViewerStatus {
+    match ent {
+        Some(e) if now < e.expires_at() => ViewerStatus::Active {
+            tier: e.tier(),
+            expires_at: e.expires_at(),
+        },
+        Some(e) => {
+            let days_over = now.saturating_sub(e.expires_at()) / 86_400;
+            if days_over < SUBSCRIPTION_GRACE_DAYS {
+                return ViewerStatus::GracePeriod {
+                    days_left: SUBSCRIPTION_GRACE_DAYS - days_over,
+                };
+            }
+            match ledger {
+                Some(l) => ghost_status(l, now),
+                None => ViewerStatus::Lapsed,
+            }
+        }
+        None => match ledger {
+            Some(l) => ghost_status(l, now),
+            None => ViewerStatus::Lapsed,
+        },
+    }
+}
+
+/// Ghost status from a ledger: months elapsed but uncollected, and
+/// the fee due for the next uncollected month.
+fn ghost_status(ledger: &GhostLedger, now: u64) -> ViewerStatus {
+    // months_elapsed is private to this module — same file, so callable.
+    let elapsed = ledger.months_elapsed(now).unwrap_or(0);
+    let collected = ledger.months_collected();
+    let months_unpaid = elapsed.saturating_sub(collected);
+    let next_fee_cents = if months_unpaid == 0 {
+        0
+    } else {
+        // months_collected is capped at GHOST_MAX_BILLABLE_MONTHS by
+        // settle(), so this cannot overflow in practice; the fallback
+        // is fail-closed toward "no fee shown" rather than a wrong fee.
+        u64::from(GHOST_FEE_STEP_CENTS)
+            .checked_mul(collected.saturating_add(1))
+            .and_then(|f| u32::try_from(f).ok())
+            .unwrap_or(0)
+    };
+    ViewerStatus::Ghost {
+        months_unpaid,
+        next_fee_cents,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,5 +1661,293 @@ mod tests {
         assert!(!format!("{}", SubscriptionError::BadWindow).is_empty());
         assert!(!format!("{}", SubscriptionError::MissingPriceTier).is_empty());
         assert!(!format!("{}", SubscriptionError::UnexpectedPriceTier).is_empty());
+    }
+
+    // -- Billing tick ----------------------------------------------------
+
+    fn tick_ledger(ghost_since: u64) -> GhostLedger {
+        GhostLedger::new(ghost_since)
+    }
+
+    #[test]
+    fn billing_tick_startup_collects_and_is_idempotent() {
+        let now = 1_700_000_000u64;
+        // 100 days as ghost: (100-30)/30+1 = 3 billing months.
+        let mut ledger = tick_ledger(now - 100 * 86_400);
+        let mut pool = CommunityPool::new();
+        let first = BillingTick::tick_at_startup(&mut ledger, &mut pool, now)
+            .expect("tick");
+        assert!(first.ran);
+        assert_eq!(first.months_collected, 3);
+        assert_eq!(first.total_cents, 500 + 1000 + 1500); // $5, $10, $15
+        assert_eq!(first.pool_balance_cents, 3000);
+        assert_eq!(ledger.months_collected(), 3);
+        // Second tick at the same `now` collects nothing.
+        let second = BillingTick::tick_at_startup(&mut ledger, &mut pool, now)
+            .expect("tick");
+        assert!(second.ran);
+        assert_eq!(second.months_collected, 0);
+        assert_eq!(second.total_cents, 0);
+        assert_eq!(pool.balance_cents(), 3000);
+    }
+
+    #[test]
+    fn billing_tick_startup_nothing_due_in_grace() {
+        let now = 1_700_000_000u64;
+        let mut ledger = tick_ledger(now - 10 * 86_400); // 10 days: grace
+        let mut pool = CommunityPool::new();
+        let outcome = BillingTick::tick_at_startup(&mut ledger, &mut pool, now)
+            .expect("tick");
+        assert!(outcome.ran);
+        assert_eq!(outcome.months_collected, 0);
+        assert_eq!(outcome.total_cents, 0);
+    }
+
+    #[test]
+    fn billing_tick_daily_noop_within_20h() {
+        let now = 1_700_000_000u64;
+        let mut ledger = tick_ledger(now - 100 * 86_400);
+        let mut pool = CommunityPool::new();
+        // First daily tick runs (never ran before).
+        let first = BillingTick::tick_daily(&mut ledger, &mut pool, now, 0)
+            .expect("tick");
+        assert!(first.ran);
+        assert_eq!(pool.balance_cents(), 3000);
+        // 10 hours later: no-op.
+        let second =
+            BillingTick::tick_daily(&mut ledger, &mut pool, now + 10 * 3600, now)
+                .expect("tick");
+        assert!(!second.ran);
+        assert_eq!(second.months_collected, 0);
+        assert_eq!(pool.balance_cents(), 3000);
+    }
+
+    #[test]
+    fn billing_tick_daily_runs_after_20h() {
+        let now = 1_700_000_000u64;
+        let mut ledger = tick_ledger(now - 200 * 86_400);
+        let mut pool = CommunityPool::new();
+        let outcome =
+            BillingTick::tick_daily(&mut ledger, &mut pool, now, now - 21 * 3600)
+                .expect("tick");
+        assert!(outcome.ran);
+        assert!(outcome.months_collected > 0);
+    }
+
+    #[test]
+    fn billing_tick_daily_clock_skew_noop() {
+        // now < last_run (clock went backwards): saturates, no-op.
+        let now = 1_700_000_000u64;
+        let mut ledger = tick_ledger(now - 100 * 86_400);
+        let mut pool = CommunityPool::new();
+        let outcome =
+            BillingTick::tick_daily(&mut ledger, &mut pool, now, now + 3600)
+                .expect("tick");
+        assert!(!outcome.ran);
+        assert_eq!(pool.balance_cents(), 0);
+    }
+
+    // -- Ledger persistence ----------------------------------------------
+
+    fn tmp_ledger_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "trv-ledger-test-{}-{}.trvl",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn ledger_save_load_roundtrip() {
+        let path = tmp_ledger_path("roundtrip");
+        let mut ledger = GhostLedger::new(1_699_000_000);
+        ledger.months_collected = 2; // same module: field access OK
+        ledger.save(&path).expect("save");
+        let loaded = GhostLedger::load(&path).expect("load");
+        assert_eq!(loaded, ledger);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ledger_load_missing_file_fails() {
+        let path = tmp_ledger_path("missing");
+        assert!(matches!(
+            GhostLedger::load(&path),
+            Err(LedgerError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn ledger_load_corrupt_fails_closed() {
+        let path = tmp_ledger_path("corrupt");
+        std::fs::write(&path, b"this is not a ledger file at all!!!!").unwrap();
+        let err = GhostLedger::load(&path).unwrap_err();
+        assert!(matches!(err, LedgerError::Corrupt(_)), "got {err:?}");
+        // Truncated to a plausible-but-short length also fails.
+        std::fs::write(&path, b"TRVG\x01\x00").unwrap();
+        assert!(matches!(
+            GhostLedger::load(&path),
+            Err(LedgerError::Corrupt(_))
+        ));
+        // Bad magic.
+        let mut bad = vec![0u8; 21];
+        bad[0..4].copy_from_slice(b"XXXX");
+        std::fs::write(&path, &bad).unwrap();
+        assert!(matches!(
+            GhostLedger::load(&path),
+            Err(LedgerError::Corrupt(_))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ledger_load_bad_version_fails() {
+        let path = tmp_ledger_path("version");
+        let mut bytes = vec![0u8; 21];
+        bytes[0..4].copy_from_slice(b"TRVG");
+        bytes[4] = 99;
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            GhostLedger::load(&path),
+            Err(LedgerError::UnsupportedVersion(99))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ledger_error_display_is_stable() {
+        assert!(!format!("{}", LedgerError::Io("x".into())).is_empty());
+        assert!(!format!("{}", LedgerError::Corrupt("x".into())).is_empty());
+        assert!(!format!("{}", LedgerError::UnsupportedVersion(9)).is_empty());
+    }
+
+    // -- Viewer status ----------------------------------------------------
+
+    fn test_entitlement(expires_at: u64) -> Entitlement {
+        let now = 1_700_000_000u64;
+        let sub = Subscription::new(
+            Tier::Monthly,
+            Some(PaidTier::Tier1),
+            now - 2 * MONTH_SECS,
+            expires_at,
+            true,
+        )
+        .expect("sub");
+        let receipt = issue_subscription_receipt(&BILLING_ISSUER_SEED, &sub)
+            .expect("issue");
+        entitlement::verify_receipt(&billing_pubkey(), &receipt).expect("verify")
+    }
+
+    #[test]
+    fn viewer_status_active() {
+        let now = 1_700_000_000u64;
+        let ent = test_entitlement(now + MONTH_SECS);
+        let ledger = GhostLedger::new(now);
+        match viewer_status(Some(ent), Some(&ledger), now) {
+            ViewerStatus::Active { tier, expires_at } => {
+                assert_eq!(tier, Tier::Monthly);
+                assert_eq!(expires_at, now + MONTH_SECS);
+            }
+            s => panic!("expected Active, got {s:?}"),
+        }
+    }
+
+    #[test]
+    fn viewer_status_grace_period() {
+        let now = 1_700_000_000u64;
+        // Expired 1 day ago: 2 days of grace left.
+        let ent = test_entitlement(now - 86_400);
+        let ledger = GhostLedger::new(now);
+        assert_eq!(
+            viewer_status(Some(ent), Some(&ledger), now),
+            ViewerStatus::GracePeriod { days_left: 2 }
+        );
+        // Expired exactly at the boundary (3 days): grace over -> ghost.
+        let ent2 = test_entitlement(now - 3 * 86_400);
+        assert!(matches!(
+            viewer_status(Some(ent2), Some(&ledger), now),
+            ViewerStatus::Ghost { .. }
+        ));
+    }
+
+    #[test]
+    fn viewer_status_lapsed_without_ledger() {
+        let now = 1_700_000_000u64;
+        // No entitlement, no ledger: dormant.
+        assert_eq!(
+            viewer_status(None, None, now),
+            ViewerStatus::Lapsed
+        );
+        // Expired past grace, no ledger: lapsed, not ghost.
+        let ent = test_entitlement(now - 30 * 86_400);
+        assert_eq!(
+            viewer_status(Some(ent), None, now),
+            ViewerStatus::Lapsed
+        );
+    }
+
+    #[test]
+    fn viewer_status_ghost_amounts() {
+        let now = 1_700_000_000u64;
+        // 100 days as ghost, nothing collected: 3 months unpaid,
+        // next fee is month-1's $5.
+        let ledger = GhostLedger::new(now - 100 * 86_400);
+        assert_eq!(
+            viewer_status(None, Some(&ledger), now),
+            ViewerStatus::Ghost {
+                months_unpaid: 3,
+                next_fee_cents: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_status_ghost_after_partial_collection() {
+        let now = 1_700_000_000u64;
+        let mut ledger = GhostLedger::new(now - 100 * 86_400);
+        let mut pool = CommunityPool::new();
+        // Collect month 1 only via a manual settle at day 45.
+        ledger
+            .settle(&mut pool, now - 55 * 86_400)
+            .expect("settle");
+        assert_eq!(ledger.months_collected(), 1);
+        // Now: 3 elapsed, 1 collected -> 2 unpaid, next fee $10.
+        assert_eq!(
+            viewer_status(None, Some(&ledger), now),
+            ViewerStatus::Ghost {
+                months_unpaid: 2,
+                next_fee_cents: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_status_ghost_in_grace_no_fee() {
+        let now = 1_700_000_000u64;
+        // 10 days as ghost: within the 30-day ghost grace.
+        let ledger = GhostLedger::new(now - 10 * 86_400);
+        assert_eq!(
+            viewer_status(None, Some(&ledger), now),
+            ViewerStatus::Ghost {
+                months_unpaid: 0,
+                next_fee_cents: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_status_back_to_active_on_payment() {
+        // The full lifecycle: active -> grace -> ghost -> active again.
+        let now = 1_700_000_000u64;
+        let ledger = GhostLedger::new(now - 100 * 86_400);
+        // Fresh entitlement = active, regardless of ghost history.
+        let ent = test_entitlement(now + MONTH_SECS);
+        assert!(matches!(
+            viewer_status(Some(ent), Some(&ledger), now),
+            ViewerStatus::Active { .. }
+        ));
     }
 }
