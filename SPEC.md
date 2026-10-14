@@ -67,6 +67,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - NFC: allow anything to be shared via NFC, but ONLY if actually following each other on the Network.
 - Customization: live account customization like Myspace (music etc.), but ENHANCED.
 - Faith glow (decided 2026-10-13): if a Remote Viewer goes to church or practices faith in some way, their profile lightly glows, growing stronger as they continue.
+- Patriot badge (decided 2026-10-13): if a Remote Viewer shows they voted (in some way), the Sentinel gives them a Flag icon at the top of their profile for patriotism (proof method TBD).
 - Creators get watermarks that can't be replaced. Remote Viewers who want to earn a living creating exclusively for TRV get 80% of what they sell.
 - Creator paywalls (confirmed 2026-10-13): creators can paywall their own content. Revenue split: 80% to creator, 20% to TRV.
 
