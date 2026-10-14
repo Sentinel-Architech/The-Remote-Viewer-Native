@@ -3,7 +3,7 @@
 *Generated 2026-10-13 from user's spec. Not pushed to GH without approval.*
 
 ## 1. Vision
-- Hybrid of all social media that are WANTED and LOVED, with NONE that are HATED.
+- Hybrid of all social media that are WANTED and LOVED, with NONE that are HATED. Every loved social media aspect lives in TRV, EXCLUSIVELY. (refined 2026-10-13)
 - Neural linguistics to help CONNECT HUMANITY IN REAL LIFE.
 - NO big centralized cloud. Local-first.
 - Inspiration: Researching Epstein files + deep dive into the Gateway Process → epiphany.
