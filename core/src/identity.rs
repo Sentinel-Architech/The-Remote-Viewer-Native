@@ -3,7 +3,7 @@
 //! Destroy = Restart: wiping keys locally is sufficient because nothing
 //! ever left the device.
 
-use crate::crypto::Keypair;
+use crate::crypto::{Keypair, KeypairError};
 
 /// Errors for local identity operations. All local; no I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +11,17 @@ pub enum IdentityError {
     /// The handle was empty after trimming. Handles like `"@RV.com"`
     /// (empty local part) are never valid.
     InvalidHandle,
+    /// The OS CSPRNG was unavailable, so no keypair could be
+    /// generated. Fails closed; never falls back to weak entropy.
+    EntropyUnavailable,
+}
+
+impl From<KeypairError> for IdentityError {
+    fn from(e: KeypairError) -> Self {
+        match e {
+            KeypairError::EntropyUnavailable => IdentityError::EntropyUnavailable,
+        }
+    }
 }
 
 impl IdentityError {
@@ -18,6 +29,7 @@ impl IdentityError {
     pub fn label(self) -> &'static str {
         match self {
             IdentityError::InvalidHandle => "invalid-handle",
+            IdentityError::EntropyUnavailable => "entropy-unavailable",
         }
     }
 }
@@ -59,7 +71,7 @@ impl LocalIdentity {
             return Err(IdentityError::InvalidHandle);
         }
         Ok(LocalIdentity {
-            keypair: Keypair::generate(),
+            keypair: Keypair::generate()?,
             handle: trimmed.to_string(),
             has_state_id,
         })
