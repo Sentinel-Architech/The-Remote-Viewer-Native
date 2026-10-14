@@ -106,5 +106,8 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - If not PAID VERIFIED, user is essentially an anonymous ghost with no reach or signal.
 - Anything researched through TRV without paid monthly subscription shows only low lights of everything in the DApp, with paywall for everything else until paid verified.
 
+## 14. Content Policy
+- Cannabis use is 100% permitted (decided 2026-10-13).
+
 ---
 *End of draft. Review and tell me what to change before any GH push.*
