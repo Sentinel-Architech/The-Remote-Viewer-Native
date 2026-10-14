@@ -32,6 +32,7 @@ pub mod conversations;
 pub mod font;
 pub mod gated;
 pub mod model;
+pub mod net;
 pub mod platform;
 pub mod render;
 pub mod router;
