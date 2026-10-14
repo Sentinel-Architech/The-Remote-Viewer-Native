@@ -132,7 +132,7 @@ fn wipe(bytes: &mut [u8]) {
 /// 32 bytes of OS entropy, or [`TransportError::EntropyUnavailable`].
 /// No time/PID fallback — a channel built on weak entropy is worse
 /// than no channel at all.
-fn random32() -> Result<[u8; 32], TransportError> {
+pub(crate) fn random32() -> Result<[u8; 32], TransportError> {
     use std::io::Read;
     let mut b = [0u8; 32];
     std::fs::File::open("/dev/urandom")
@@ -142,7 +142,7 @@ fn random32() -> Result<[u8; 32], TransportError> {
 }
 
 /// X25519 base point: u = 9.
-const BASE_POINT: [u8; 32] = {
+pub(crate) const BASE_POINT: [u8; 32] = {
     let mut b = [0u8; 32];
     b[0] = 9;
     b
@@ -154,7 +154,7 @@ const BASE_POINT: [u8; 32] = {
 /// 5×51-bit field arithmetic from [`crate::crypto::ed25519`] — no
 /// duplicated field code. The ladder is constant-time in the field
 /// operations (`fe_cmov` selects without branching on secret bits).
-fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     // RFC 7748 scalar clamping: clear bits 0,1,2 and 255, set bit 254.
     let mut e = *scalar;
     e[0] &= 248;
@@ -216,13 +216,13 @@ fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
 }
 
 /// HKDF-Extract (RFC 5869 §2.1) with HMAC-SHA512: `PRK = HMAC(salt, ikm)`.
-fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 64] {
+pub(crate) fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; 64] {
     hmac_sha512(salt, ikm)
 }
 
 /// HKDF-Expand (RFC 5869 §2.3) with HMAC-SHA512, writing `out.len()`
 /// bytes. `T(0)` is empty; `T(i) = HMAC(PRK, T(i-1) || info || i)`.
-fn hkdf_expand(prk: &[u8; 64], info: &[u8], out: &mut [u8]) {
+pub(crate) fn hkdf_expand(prk: &[u8; 64], info: &[u8], out: &mut [u8]) {
     let mut t = [0u8; 64];
     let mut t_len = 0usize;
     let mut pos = 0usize;
@@ -270,7 +270,7 @@ const ORDER_PROBE_SCALAR: [u8; 32] = {
 /// Such a point would confine the Diffie-Hellman output to a handful
 /// of attacker-known values (small-subgroup confinement, RFC 7748
 /// §5 considerations); it must never enter the key schedule.
-fn is_low_order(peer: &[u8; 32]) -> bool {
+pub(crate) fn is_low_order(peer: &[u8; 32]) -> bool {
     x25519(&ORDER_PROBE_SCALAR, peer) == [0u8; 32]
 }
 

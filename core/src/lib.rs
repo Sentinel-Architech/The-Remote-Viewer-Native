@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod hw;
 pub mod hydra;
 pub mod identity;
+pub mod mail;
 pub mod messaging;
 pub mod moe;
 pub mod neuroling;
