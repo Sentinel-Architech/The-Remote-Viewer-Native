@@ -28,6 +28,7 @@
 - Spy detection (decided 2026-10-13): The Remote Viewer natively detects anything spy-related.
 - Post-quantum crypto targets (verified 2026-10-14): NIST FIPS 203 (ML-KEM-768/1024) for key encapsulation designed to resist harvest-now-decrypt-later attacks; FIPS 204 (ML-DSA) for signatures with FIPS 205 (SLH-DSA, hash-based) as the conservative fallback; hybrid classical+PQC approach per NIST migration guidance. NFC out-of-band public-key exchange (no cloud relay) and mlock-style protection of key material in memory are adopted design goals. All are design targets, not current implementation — no production transport encryption exists yet.
 - Patent/IP posture (verified 2026-10-14): USPTO Director John Squires confirmed 2025-09-18, runs an "America First IP" agenda. Alice Corp v. CLS Bank (2014) §101 two-step test applies to software patentability — technical improvement of computer functioning qualifies. Only natural persons can be inventors. Caution: the HYDRA name is crowded — Catapult Hydra (Pango VPN protocol) and Cardano Hydra (blockchain L2) are real prior uses; naming collision risk flagged before any branding/IP filing.
+- SBOM requirement (decided 2026-10-14): a Software Bill of Materials is generated for every release, per EO 14028 and NIST SSDF (SP 800-218). Memory-safe language throughout (Rust); no memory-unsafe code in the dependency tree.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
 ## 3. Target Devices
@@ -42,6 +43,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `backend/` — local-first Hub replacement in Rust (no Node): native auth, SQLite, profile vault, daily watch logic.
 - `ui/` — truly native UI (egui/iced, not webview) + holographic-ui.
 - **Home widget** (decided 2026-10-13): customizable TRV widget for daily thoughts, news, mail, calls, or anything else the user wants. Fully customizable at the highest tier.
+- **Feed & notification design rules** (decided 2026-10-14): finite, structured content batches with intentional stopping cues (no infinite scroll); scheduled notification batching prioritizing direct peer-to-peer interaction over passive engagement metrics; high-contrast scannable layouts with explicit visual hierarchy; no autoplay — media requires deliberate user input before playing. Design goal: connection-first, anti-doomscrolling.
 - `cli/` — Sentinel CLI in Rust.
 - `edge/` — Termux helpers, ESP32 stubs, GrapheneOS verified.
 - Explicitly out: Solana Track A scaffold stays separate (see §10), EVM contracts held, Expo/Vite legacy parked.
