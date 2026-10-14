@@ -24,6 +24,7 @@
 - User retains full ownership. No human may claim ownership because their AI helped create an aspect.
 - No AI training (decided 2026-10-13): no SI or AI is to be trained on the system at any point — HEAVY PENALTY for even an attempt.
 - Security bar (decided 2026-10-13): the BEST SECURITY A DAPP CAN HAVE, for all users.
+- Security target (decided 2026-10-13): secure enough that the President could tell his Secret Service to use it. (Aspirational target, not a current claim.)
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
 ## 3. Target Devices
