@@ -54,6 +54,7 @@
 - **Watermarks**: creators get watermarks that cannot be replaced. (Policy only; no implementation.)
 - **Live customization**: Myspace-style account customization with music, but ENHANCED — creator profiles drive this. (Not implemented.)
 - **NFT external sales** (decided 2026-10-13): NFTs can be sold outside TRV for a 20% fee to TRV. (Policy only; no marketplace or settlement implemented.)
+- **Artist NFT flow** (decided 2026-10-13): an artist can take a picture with the TRV camera, use TRV art skills to create a one-of-a-kind NFT incorporating the picture, and sell it. Artists are rewarded in small ways for keeping content exclusively on TRV (specific rewards TBD; policy only).
 
 ## 4. What's Built vs What's Not
 
