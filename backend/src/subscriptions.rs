@@ -488,6 +488,95 @@ impl GhostAccount {
             .checked_mul(u64::from(GHOST_FEE_STEP_CENTS))
             .and_then(|fee| u32::try_from(fee).ok())
     }
+
+    /// Collect this ghost's current monthly fee into the community pool.
+    ///
+    /// The fee is computed by [`GhostAccount::monthly_fee_cents`] and
+    /// deposited automatically — per spec, ghost-tier escalation fees
+    /// fund the community pool (NFT fee/gas waivers). Returns the fee
+    /// collected in cents. `None` on arithmetic overflow: fail closed,
+    /// nothing is deposited.
+    pub fn pay_monthly_fee(self, pool: &mut CommunityPool, now: u64) -> Option<u32> {
+        let fee = self.monthly_fee_cents(now)?;
+        pool.deposit(u64::from(fee));
+        Some(fee)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Community pool: ghost fees fund NFT fee/gas waivers
+// ---------------------------------------------------------------------------
+
+/// Errors from community-pool operations.
+///
+/// Fail closed: the pool never overdrafts and never wraps around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityPoolError {
+    /// Withdrawal/waiver exceeds the pool balance: denied, untouched.
+    InsufficientFunds,
+}
+
+impl core::fmt::Display for CommunityPoolError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            CommunityPoolError::InsufficientFunds => {
+                "community pool: insufficient funds"
+            }
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::error::Error for CommunityPoolError {}
+
+/// The community pool: every ghost-tier escalation fee flows here, and
+/// it funds NFT fee/gas waivers for viewers.
+///
+/// Balance is tracked in cents (the smallest currency unit). All math
+/// saturates — deposits can never wrap around — and withdrawals fail
+/// closed on insufficient funds, so the pool can never go negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CommunityPool {
+    balance_cents: u64,
+}
+
+impl CommunityPool {
+    /// An empty pool.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current balance in cents.
+    pub fn balance_cents(self) -> u64 {
+        self.balance_cents
+    }
+
+    /// Deposit community revenue (ghost fees, per
+    /// [`GhostAccount::pay_monthly_fee`]). Saturates at `u64::MAX`.
+    pub fn deposit(&mut self, amount_cents: u64) {
+        self.balance_cents = self.balance_cents.saturating_add(amount_cents);
+    }
+
+    /// Withdraw `amount_cents` to cover an NFT fee/gas waiver.
+    ///
+    /// Fails closed with [`CommunityPoolError::InsufficientFunds`] when
+    /// the pool cannot cover it; the balance is left untouched.
+    pub fn withdraw(&mut self, amount_cents: u64) -> Result<(), CommunityPoolError> {
+        if amount_cents > self.balance_cents {
+            return Err(CommunityPoolError::InsufficientFunds);
+        }
+        self.balance_cents -= amount_cents;
+        Ok(())
+    }
+
+    /// Attempt an NFT fee/gas waiver of `fee_cents`.
+    ///
+    /// Returns `true` and deducts the fee when the pool covers it;
+    /// returns `false` and leaves the pool untouched when it does not.
+    /// This is the check-and-deduct entry point for waiver grants.
+    pub fn try_waiver(&mut self, fee_cents: u64) -> bool {
+        self.withdraw(fee_cents).is_ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -917,6 +1006,128 @@ mod tests {
         let ghost = GhostAccount::new(1_700_000_000);
         assert_eq!(ghost.days_as_ghost(1_699_999_999), 0);
         assert_eq!(ghost.monthly_fee_cents(1_699_999_999), Some(0));
+    }
+
+    // ---- Community pool ----
+
+    #[test]
+    fn community_pool_deposits_accumulate() {
+        let mut pool = CommunityPool::new();
+        assert_eq!(pool.balance_cents(), 0);
+        pool.deposit(500); // $5 ghost month 1
+        pool.deposit(1000); // $10 ghost month 2
+        assert_eq!(pool.balance_cents(), 1500);
+    }
+
+    #[test]
+    fn community_pool_waiver_deducts_when_covered() {
+        let mut pool = CommunityPool::new();
+        pool.deposit(2000);
+        assert!(pool.try_waiver(500)); // $5 NFT gas waiver
+        assert_eq!(pool.balance_cents(), 1500);
+        assert!(pool.try_waiver(1500)); // exact-balance waiver
+        assert_eq!(pool.balance_cents(), 0);
+    }
+
+    #[test]
+    fn community_pool_waiver_fails_closed_when_short() {
+        let mut pool = CommunityPool::new();
+        // Empty pool: denied, balance untouched.
+        assert!(!pool.try_waiver(500));
+        assert_eq!(pool.balance_cents(), 0);
+        // Partial coverage: denied, balance untouched.
+        pool.deposit(300);
+        assert!(!pool.try_waiver(500));
+        assert_eq!(pool.balance_cents(), 300);
+        // withdraw() reports the failure explicitly.
+        assert_eq!(
+            pool.withdraw(500),
+            Err(CommunityPoolError::InsufficientFunds)
+        );
+        assert_eq!(pool.balance_cents(), 300);
+    }
+
+    #[test]
+    fn community_pool_withdraw_exact_balance_ok() {
+        let mut pool = CommunityPool::new();
+        pool.deposit(500);
+        assert_eq!(pool.withdraw(500), Ok(()));
+        assert_eq!(pool.balance_cents(), 0);
+        // Zero-amount operations are no-ops, never errors.
+        assert_eq!(pool.withdraw(0), Ok(()));
+        assert!(pool.try_waiver(0));
+    }
+
+    #[test]
+    fn community_pool_saturates_never_overflows() {
+        let mut pool = CommunityPool::new();
+        pool.deposit(u64::MAX);
+        assert_eq!(pool.balance_cents(), u64::MAX);
+        pool.deposit(1); // must saturate, not wrap to 0
+        assert_eq!(pool.balance_cents(), u64::MAX);
+        pool.deposit(u64::MAX);
+        assert_eq!(pool.balance_cents(), u64::MAX);
+    }
+
+    #[test]
+    fn ghost_fee_collection_feeds_pool() {
+        let mut pool = CommunityPool::new();
+        let ghost = GhostAccount::new(1_700_000_000);
+        let start = ghost.ghost_since();
+        // Day 90: month 3 -> $15 collected into the pool.
+        assert_eq!(
+            ghost.pay_monthly_fee(&mut pool, start + 90 * 86_400),
+            Some(1500)
+        );
+        assert_eq!(pool.balance_cents(), 1500);
+        // Day 120: month 4 -> $20 more; pool accumulates.
+        assert_eq!(
+            ghost.pay_monthly_fee(&mut pool, start + 120 * 86_400),
+            Some(2000)
+        );
+        assert_eq!(pool.balance_cents(), 3500);
+    }
+
+    #[test]
+    fn ghost_grace_collects_nothing() {
+        let mut pool = CommunityPool::new();
+        let ghost = GhostAccount::new(1_700_000_000);
+        // Day 10: grace period, fee is $0 -> pool stays empty.
+        assert_eq!(
+            ghost.pay_monthly_fee(&mut pool, ghost.ghost_since() + 10 * 86_400),
+            Some(0)
+        );
+        assert_eq!(pool.balance_cents(), 0);
+    }
+
+    #[test]
+    fn community_pool_waiver_uses_ghost_fees() {
+        // End-to-end: ghost pays in, viewer gets an NFT fee waiver out.
+        let mut pool = CommunityPool::new();
+        let ghost = GhostAccount::new(1_700_000_000);
+        let start = ghost.ghost_since();
+        ghost
+            .pay_monthly_fee(&mut pool, start + 60 * 86_400)
+            .expect("collect month 2: $10");
+        ghost
+            .pay_monthly_fee(&mut pool, start + 90 * 86_400)
+            .expect("collect month 3: $15");
+        assert_eq!(pool.balance_cents(), 2500); // $25 total
+        // A $20 NFT gas waiver is covered.
+        assert!(pool.try_waiver(2000));
+        assert_eq!(pool.balance_cents(), 500);
+        // A second $20 waiver is not.
+        assert!(!pool.try_waiver(2000));
+        assert_eq!(pool.balance_cents(), 500);
+    }
+
+    #[test]
+    fn community_pool_error_display_is_stable() {
+        assert!(!format!("{}", CommunityPoolError::InsufficientFunds).is_empty());
+        assert_eq!(
+            format!("{}", CommunityPoolError::InsufficientFunds),
+            "community pool: insufficient funds"
+        );
     }
 
     // ---- Receipt bridge ----
