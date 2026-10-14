@@ -26,6 +26,7 @@
 - Security bar (decided 2026-10-13): the BEST SECURITY A DAPP CAN HAVE, for all users.
 - Security target (decided 2026-10-13): secure enough that the President could tell his Secret Service to use it. (Aspirational target, not a current claim.)
 - Spy detection (decided 2026-10-13): The Remote Viewer natively detects anything spy-related.
+- Post-quantum crypto targets (verified 2026-10-14): NIST FIPS 203 (ML-KEM-768/1024) for key encapsulation designed to resist harvest-now-decrypt-later attacks; FIPS 204 (ML-DSA) for signatures with FIPS 205 (SLH-DSA, hash-based) as the conservative fallback; hybrid classical+PQC approach per NIST migration guidance. NFC out-of-band public-key exchange (no cloud relay) and mlock-style protection of key material in memory are adopted design goals. All are design targets, not current implementation — no production transport encryption exists yet.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
 ## 3. Target Devices
