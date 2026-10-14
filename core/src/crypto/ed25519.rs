@@ -1063,6 +1063,18 @@ pub fn verify(public: &PublicKey, msg: &[u8], sig: &Signature) -> bool {
     if ge_tobytes(&a_pt) == ge_tobytes(&ge_identity()) {
         return false;
     }
+    // Reject small-order public keys (order dividing 8). The
+    // verification equation below is the non-cofactored
+    // [S]B - [k]A == R; for a small-order A an attacker can forge
+    // signatures in ~8 hash tries with no secret: pick random s, try
+    // t in 0..8 with R = [s]B - [t]A, keep the t with
+    // H(R||A||M) = t (mod 8). Honestly generated keys are always
+    // full-order ([a]B with a not a multiple of L), so this rejects
+    // only attacker-crafted keys. Fail closed.
+    let eight_a = ge_scalarmult(&a_pt, &[8, 0, 0, 0]);
+    if ge_tobytes(&eight_a) == ge_tobytes(&ge_identity()) {
+        return false;
+    }
     let r_bytes: [u8; 32] = sig.0[..32].try_into().unwrap_or([0u8; 32]);
     let s_bytes: [u8; 32] = sig.0[32..].try_into().unwrap_or([0u8; 32]);
     // S must be canonical (< L); non-canonical S enables malleability.
@@ -1278,6 +1290,123 @@ mod tests {
         // reduce64 of L+1 is 1.
         l_bytes[0] = l_bytes[0].wrapping_add(1);
         assert_eq!(sc_reduce64(&l_bytes), [1, 0, 0, 0]);
+    }
+
+    /// Decode a compressed point and assert it has exactly `order`
+    /// (self-validating: a wrong test vector fails here, loudly,
+    /// rather than silently testing nothing).
+    fn assert_point_order(enc_hex: &str, order: u64) {
+        let enc = hex_to_32(enc_hex);
+        let p = ge_frombytes(&enc).expect("torsion point must decompress");
+        let id = ge_tobytes(&ge_identity());
+        let mul = |s: u64| ge_tobytes(&ge_scalarmult(&p, &[s, 0, 0, 0]));
+        assert_eq!(mul(order), id, "point must have order dividing {order}");
+        if order > 1 {
+            assert_ne!(mul(order / 2), id, "point order must be exactly {order}");
+        }
+    }
+
+    /// The order-2 torsion point (0, -1): y = p - 1, x = 0.
+    const ORDER2_HEX: &str =
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+
+    #[test]
+    fn small_order_public_keys_rejected() {
+        // Self-validate the vector, then check verify() rejects it
+        // for any signature: the key check runs before signature math.
+        assert_point_order(ORDER2_HEX, 2);
+        let pk = PublicKey::from_bytes(hex_to_32(ORDER2_HEX));
+        let garbage_sig = Signature([0x42u8; 64]);
+        assert!(
+            !verify(&pk, b"anything", &garbage_sig),
+            "small-order key must be rejected"
+        );
+        // ...including a signature that is otherwise well-formed for
+        // a different key (rejection is about the key, not the sig).
+        let (s, p) = generate(&[5u8; 32]);
+        let real_sig = sign(&s, &p, b"anything");
+        assert!(
+            !verify(&pk, b"anything", &real_sig),
+            "small-order key must be rejected even with a valid-shaped sig"
+        );
+    }
+
+    #[test]
+    fn small_order_forgery_is_blocked() {
+        // The attack this rejection stops: with the non-cofactored
+        // equation [S]B - [k]A == R and a small-order A (order d),
+        // pick random s, try t in 0..d with R = [s]B - [t]A, and keep
+        // the t with H(R||A||M) == t (mod d). No secret needed; each
+        // s tried yields a hit with probability ~1.
+        let a_enc = hex_to_32(ORDER2_HEX);
+        assert_point_order(ORDER2_HEX, 2);
+        let a_pt = ge_frombytes(&a_enc).expect("torsion point must decompress");
+        let a_pub = PublicKey::from_bytes(a_enc);
+        let msg = b"forged approval";
+        const D: u64 = 2; // order of A
+        let neg = |p: &Ge| Ge {
+            x: fe_neg(&p.x),
+            y: p.y,
+            z: p.z,
+            t: fe_neg(&p.t),
+        };
+        let mut forged: Option<([u8; 32], [u8; 32])> = None;
+        for seed in 0u64..100 {
+            // Deterministic s from the seed (test-only; the real
+            // attacker picks these at random).
+            let s = sc_reduce64(&sha512::digest(format!("forge{seed}").as_bytes()));
+            let s_b = ge_scalarmult_base(&s);
+            for t in 0..D {
+                let t_a = ge_scalarmult(&a_pt, &[t, 0, 0, 0]);
+                let r_pt = ge_add(&s_b, &neg(&t_a));
+                let r_bytes = ge_tobytes(&r_pt);
+                let mut k_input = Vec::with_capacity(64 + msg.len());
+                k_input.extend_from_slice(&r_bytes);
+                k_input.extend_from_slice(&a_enc);
+                k_input.extend_from_slice(msg);
+                let k = sc_reduce64(&sha512::digest(&k_input));
+                // Check the EXACT equation verify() uses:
+                // [s]B + [(-k) mod L]A == R ?
+                let r_calc = ge_add(
+                    &ge_scalarmult_base(&s),
+                    &ge_scalarmult(&a_pt, &sc_neg(&k)),
+                );
+                if ge_tobytes(&r_calc) == r_bytes {
+                    forged = Some((r_bytes, limbs_to_bytes32(&s)));
+                    break;
+                }
+            }
+            if forged.is_some() {
+                break;
+            }
+        }
+        let (r_bytes, s_bytes) = forged.expect("forgery must succeed within 100 tries");
+        // The forged (R, S) satisfies the raw verification equation —
+        // i.e. without the small-order key check, verify() would
+        // accept it. This proves the attack was real.
+        let mut k_input = Vec::with_capacity(64 + msg.len());
+        k_input.extend_from_slice(&r_bytes);
+        k_input.extend_from_slice(&a_enc);
+        k_input.extend_from_slice(msg);
+        let k = sc_reduce64(&sha512::digest(&k_input));
+        let s_limbs = limbs_from_bytes32(&s_bytes);
+        let r_calc = ge_add(
+            &ge_scalarmult_base(&s_limbs),
+            &ge_scalarmult(&a_pt, &sc_neg(&k)),
+        );
+        assert_eq!(
+            ge_tobytes(&r_calc),
+            r_bytes,
+            "forged signature must satisfy the equation (attack is real)"
+        );
+        // ...but verify() rejects it because the key is small-order.
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&r_bytes);
+        sig_bytes[32..].copy_from_slice(&s_bytes);
+        assert!(
+            !verify(&a_pub, msg, &Signature(sig_bytes)),
+            "forged signature under small-order key must be rejected"
+        );
     }
 
 
