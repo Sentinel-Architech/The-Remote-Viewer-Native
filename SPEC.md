@@ -39,6 +39,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `core/` — crypto, E2E reverse-inverted scramble QR, optical air-gap (age + Soliton LT + QR), Ed25519 identity, self-heal, MoE router/gate.
 - `backend/` — local-first Hub replacement in Rust (no Node): native auth, SQLite, profile vault, daily watch logic.
 - `ui/` — truly native UI (egui/iced, not webview) + holographic-ui.
+- **Home widget** (decided 2026-10-13): customizable TRV widget for daily thoughts, news, mail, calls, or anything else the user wants.
 - `cli/` — Sentinel CLI in Rust.
 - `edge/` — Termux helpers, ESP32 stubs, GrapheneOS verified.
 - Explicitly out: Solana Track A scaffold stays separate (see §10), EVM contracts held, Expo/Vite legacy parked.
