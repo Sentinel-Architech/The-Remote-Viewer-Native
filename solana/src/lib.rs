@@ -48,6 +48,7 @@ pub mod referral;
 pub mod staking;
 pub mod token;
 pub mod transfer_hook;
+pub mod identity;
 
 pub use math::MathError;
 pub use program::{Instruction, ProgramError};
