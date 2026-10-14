@@ -27,8 +27,12 @@
 //! a new device never rewrites the UI.
 
 pub mod backends;
+pub mod chat;
+pub mod conversations;
 pub mod font;
+pub mod gated;
 pub mod model;
 pub mod platform;
 pub mod render;
+pub mod router;
 pub mod screen;

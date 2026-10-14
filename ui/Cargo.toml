@@ -7,5 +7,6 @@ description = "The Remote Viewer Network portable UI core: zero platform APIs, s
 
 [dependencies]
 trv-core = { path = "../core" }
+trv-backend = { path = "../backend" }
 
 [dev-dependencies]
