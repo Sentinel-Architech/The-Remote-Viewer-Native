@@ -17,7 +17,7 @@ A decentralized, local-first network for real human connection — built to carr
 
 ## Under the hood
 
-Built native in **Rust** — standard library only, **zero dependencies**. 575 tests passing and climbing (verified 2026-10-14). Post-quantum crypto targets (NIST FIPS 203/204/205). SBOM published with every release. Rate limiting, hardware-rooted identity, and air-gap-first design baked in from day one.
+Built native in **Rust** — standard library only, **zero dependencies**. 620 tests passing and climbing (verified 2026-10-14). Post-quantum crypto targets (NIST FIPS 203/204/205). SBOM published with every release. Rate limiting, hardware-rooted identity, and air-gap-first design baked in from day one.
 
 ## Status
 
