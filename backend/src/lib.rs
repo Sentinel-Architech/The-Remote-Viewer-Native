@@ -6,6 +6,7 @@
 pub mod activation;
 pub mod ads;
 pub mod badges;
+pub mod creator;
 pub mod entitlement;
 pub mod gates;
 pub mod paywall;
