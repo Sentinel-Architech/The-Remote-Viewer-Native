@@ -1,0 +1,9 @@
+[package]
+name = "trv-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Remote Viewer native backend: local-first store, profile vault, tier entitlements. No Node, no network."
+
+[dependencies]
+trv-core = { path = "../core" }

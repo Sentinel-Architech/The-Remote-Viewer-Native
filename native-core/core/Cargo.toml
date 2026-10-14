@@ -1,0 +1,6 @@
+[package]
+name = "trv-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Remote Viewer native core: on-device crypto, identity, E2E QR, air-gap, MoE router, Sentinel. No network, no corporate deps."

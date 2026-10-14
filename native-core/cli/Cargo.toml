@@ -1,0 +1,12 @@
+[package]
+name = "trv-sentinel-cli"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+trv-core = { path = "../core" }
