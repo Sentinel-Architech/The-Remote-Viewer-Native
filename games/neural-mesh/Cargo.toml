@@ -1,0 +1,22 @@
+[package]
+name = "trv-neural-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Neural Mesh (code name neural-link): matrix-themed brain-journey simulation game for the TRV DApp. Pure-Rust game logic scaffold; std-only, zero dependencies."
+
+# Standalone crate: intentionally NOT a member of the parent workspace
+# (parent Cargo.toml lists members explicitly). The empty [workspace]
+# table below stops cargo from walking up to the parent workspace root.
+[workspace]
+
+[lib]
+name = "trv_neural_mesh"
+path = "src/lib.rs"
+
+[dependencies]
+# Single-journey contract with God's Eye (part 2). Path-only, std-only.
+trv-game-journey = { path = "../shared" }
+
+[profile.release]
+opt-level = "z"
+lto = true

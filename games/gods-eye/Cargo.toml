@@ -1,0 +1,18 @@
+[package]
+name = "trv-gods-eye"
+version = "0.1.0"
+edition = "2021"
+description = "God's Eye: a high-resolution cyber-threat simulation game for The Remote Viewer Network. See README.md for design."
+
+# Standalone crate: intentionally NOT a member of the parent workspace
+# (parent Cargo.toml lists members explicitly). The empty [workspace]
+# table below stops cargo from walking up to the parent workspace root.
+[workspace]
+
+[lib]
+name = "gods_eye"
+path = "src/lib.rs"
+
+[dependencies]
+# Single-journey contract with Neural Mesh (part 1). Path-only, std-only.
+trv-game-journey = { path = "../shared" }

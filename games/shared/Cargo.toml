@@ -1,0 +1,13 @@
+[package]
+name = "trv-game-journey"
+version = "0.1.0"
+edition = "2021"
+description = "Single-journey contract between Neural Mesh (part 1) and God's Eye (part 2): the transition trigger, carried-over state, and the save format part 2 reads. Std-only, zero dependencies."
+
+# Standalone crate: intentionally NOT a member of the parent workspace.
+# The empty [workspace] table stops cargo from walking up to the parent root.
+[workspace]
+
+[lib]
+name = "trv_game_journey"
+path = "src/lib.rs"
