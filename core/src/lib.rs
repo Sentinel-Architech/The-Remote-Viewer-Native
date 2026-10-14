@@ -22,4 +22,5 @@ pub mod sentinel;
 pub mod sharing;
 pub mod transport;
 pub mod verify;
+pub mod verify_flow;
 pub mod wallet;
