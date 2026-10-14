@@ -95,6 +95,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `trv_governance` in GH is scaffold/Track A, not proven, CI blocked, not audited, not mainnet. Proven path today is USDC+memo via `digital-vending/`.
 - AR: like Pokemon Go for adults, NO cartoon animation. TRV tokens geolocated and earned into TRV-native crypto wallets, exclusive to TRV.
 - **AR earnings** (decided 2026-10-13): TRV tokens gathered through AR are credited to the viewer's TRV wallet, spendable on profile customization and other Network purchases.
+- **AR exploration** (decided 2026-10-13): Remote Viewers gain TRV crypto dust (small amounts) when they explore nature and find new areas. (Note: "dust" here means small rewards — distinct from the anti-cashout dust rule below.)
 - **AR anti-cashout** (decided 2026-10-13): AR-earned TRV becomes dust if moved to an outside wallet. AR tokens are spendable in-Network only (customization, purchases) — they cannot be cashed out.
 - No TRV tokens transferred to other platforms WITHOUT a transfer fee to TRV. (Transfer-fee amount: **25% to TRV — decided 2026-10-13.** The 50 bps placeholder in `core/src/wallet.rs` is being replaced with the decided 25%. TRV token intended as Solana blockchain crypto.)
 - **External spend fee** (decided 2026-10-13): spending TRV coin elsewhere incurs a 20% fee. This is separate from the 25% transfer fee. Staking is free regardless of how much or how little is staked; staking for 90 days wipes out the 20% fee entirely for the duration of the stake.
