@@ -41,6 +41,7 @@
 - **AR earnings** (decided 2026-10-13): TRV tokens gathered through AR are credited to the viewer's TRV wallet, spendable on profile customization and other Network purchases.
 - **AR exploration** (decided 2026-10-13): Remote Viewers gain TRV crypto dust (small amounts) when they explore nature and find new areas. (Note: "dust" here means small rewards — distinct from the anti-cashout dust rule below.) (Policy only; no AR exploration mechanism implemented.)
 - **AR anti-cashout** (decided 2026-10-13): AR-earned TRV becomes dust if moved to an outside wallet. AR tokens are spendable in-Network only (customization, purchases) — they cannot be cashed out.
+- **AR respectful bonus** (decided 2026-10-13): viewers earn MORE TRV when their Sentinel politely warns them they may be heading toward private property, as long as there are no recent crimes in that area. (Policy only; no AR mechanism implemented.)
 - **External spend fee** (decided 2026-10-13): spending TRV coin elsewhere incurs a 20% fee. This is separate from the 25% transfer fee. Staking is free regardless of how much or how little is staked; staking for 90 days wipes out the 20% fee entirely for the duration of the stake. (Policy only; no fee collection or staking mechanism implemented.)
 - **Staking rewards** (decided 2026-10-13): the more TRV staked, the more earned (proportional rewards; specific rates TBD). **Staking lock**: taking out stake beforehand is PROHIBITED — 90-day lock, no early unstaking. (Policy only; no staking mechanism implemented.)
 
