@@ -38,6 +38,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `cli/` — Sentinel CLI in Rust.
 - `edge/` — Termux helpers, ESP32 stubs, GrapheneOS verified.
 - Explicitly out: Solana Track A scaffold stays separate (see §10), EVM contracts held, Expo/Vite legacy parked.
+- **Five-layer sovereign architecture** (from July 2026 draft, decided 2026-10-13): (1) OS layer — GrapheneOS hardened execution: strict app sandboxing, memory-corruption defenses, zero network telemetry; (2) Compilation layer — local bare-metal compile via cargo/rustc for total binary auditability; (3) Data layer — local-first encrypted onboard storage plus immutable blockstore ledgers, all state sovereign and under local control; (4) Network layer — distributed P2P mesh with content-addressed routing and encrypted transport, no corporate intermediaries; (5) Execution layer — self-hosted local validator execution powering dApps on-device. (Blueprint only; no implementation.)
 
 ## 5. Mixture of Experts + The Sentinel (EI)
 - On-device MoE to help each Remote Viewer learn/find on local device. No cloud.
@@ -63,6 +64,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - ID verification purpose (decided 2026-10-13): state and federal approval ID verification is to aid in preventing the exploitation of minors.
 - ID data handling (decided 2026-10-13): front and back of ID are required, but all data stays on-device until transfer.
 - If Remote Viewer doesn't own a State ID then VERIFICATION is ineligible.
+- **LiDAR spatial handshake** (from early drafts, decided 2026-10-13): room-geometry fingerprint (LiDAR scan of room landmarks) used as a biometric-equivalent authentication factor, with anti-spoof pulse fingerprinting. Concrete use of the Sentinel's all-sensors-and-components rule. (Policy only; no implementation.)
 
 ## 7. Communication & Sharing
 - Each Remote Viewer gets E2E reverse-inverted scramble encryption QR, shared only with chosen contacts via camera OR ~1 mile proximity.
@@ -110,12 +112,14 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Each Remote Viewer gets their own digital wallet exclusive to TRV to add money or buy through TRV ecosystem.
 - **Self-custody** (decided 2026-10-13): each Remote Viewer is 100% in charge of their own crypto wallet, which is exclusively TRV — TRV never takes custody.
 - Native camera required for AR, same with phone, GPS, text and everything else a phone uses to communicate — all native.
+- **AR capture mechanics** (from early drafts, decided 2026-10-13): token rarity tiers Common (10-25 TRV, 60% spawn) → Uncommon (25-50, 25%) → Rare (50-100, 10%) → Epic (100-250, 4%) → Legendary (250-1000, 1%). Capture rules: 10-meter capture radius, expiry, 5-minute cooldown (no cooldown for top tier), per-tier daily capture limits (20/50/100). GPS-spoofing prevention: mock-location detection, >100m accuracy rejection, altitude anomaly checks, impossible-movement detection, location-history consistency. Streaks (3/7/14/30-day, 1.1x-2.0x multipliers) and achievements (First Capture, Token Hunter, Legendary Collector, Social Butterfly, World Explorer). Social discovery: 50m radius nearby-user matching with compatibility score (interests 40%, verification 20%, activity 20%, location 20%). **NOTE**: glow/particle visual effects from the old drafts are SKIPPED — they conflict with the user's "NO cartoon animation" rule. (Policy only; no implementation.)
 
 ## 11. Safety — HYDRA
 - HYDRA PROTOCOL // SENTINEL OS: safety reporting for serious harms.
 - Censored outbound packet; original seal stays on-device in local M-o-E; per-region emergency numbers.
 - Reference: `apps/hub/src/lib/trv/hydra.ts` in main repo.
 - Exploitation response (decided 2026-10-13): if a pedophile attempts to exploit, the attempt is immediately geo-located and sent to authorities.
+- **Active defense** (from early drafts, decided 2026-10-13): Hydra detects, diverts, and scrambles attacker data on the intruder's own device, with on-device AI catching a single harmful data flow before damage occurs. **LEGAL CAVEAT**: counter-strikes are of questionable legality under international law — requires legal review before implementation. (Policy only; no implementation.)
 
 ## 12. Token Pool (from GH TOKENOMICS, to confirm)
 - Digital / NFT primary: 80% creator, 10% pool, 10% platform (per TOKENOMICS.md).
