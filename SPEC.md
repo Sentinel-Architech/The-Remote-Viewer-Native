@@ -54,6 +54,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
   - Game 2 "Neural Mesh" (decided 2026-10-13; code name in GH: "neural-link"): matrix-themed through the brain, covering medical ailments to heal and protect the brain; all in-game education to be medically relevant to 2026. (Creative direction for the game, not a medical claim.)
   - Transitions (decided 2026-10-13): vortex animation for transitions into games, out of games, and between in-game events.
   - The Sentinel is to have the ability to use ALL SENSORS AND COMPONENTS of the Remote Viewer device.
+  - Sentinel compute scaling (decided 2026-10-13): The Sentinel (Enhanced Intelligence) goes above and beyond if the Remote Viewer has the compute power — adaptive to device capability.
 
 ## 6. Identity & Email
 - Login via traditional email to verify they are real.
@@ -77,6 +78,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - Creator paywalls (confirmed 2026-10-13): creators can paywall their own content. Revenue split: 80% to creator, 20% to TRV.
 - Adult content (decided 2026-10-13): if two adults are consenting and it's XXX, it goes behind a paywall for a fee of the creator's choice, with 15% going to TRV Network for NFT costs. (Exception to the standard 80/20 creator split — adult XXX uses 85/15.)
 - Creator video (decided 2026-10-13): creators can post videos up to 3 hours long, at 4K resolution, if they choose.
+- Creator games (decided 2026-10-13): if creators want to create a game through TRV, then so be it — allowed.
 
 ## 8. Subscriptions, Tiers, Founding Members
 - Tiers (decided 2026-10-13): Tier 1 — $10/month or $100/year; Tier 2 — $25/month or $150/year; Tier 3 — $45/month or $200/year.
