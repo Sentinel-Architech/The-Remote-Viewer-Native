@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod gateway;
 pub mod hw;
 pub mod identity;
+pub mod messaging;
 pub mod moe;
 pub mod neuroling;
 pub mod news;
