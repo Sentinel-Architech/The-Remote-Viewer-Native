@@ -30,6 +30,8 @@
 
 **Ads policy** (decided 2026-10-13): Ghost tier gets native ads at 15 seconds per minute watched. No other tier gets ads. Native ads are served on-device, not via corporate ad networks. (Policy only; ad inventory, scheduling, and playback are not implemented.)
 
+**Ghost tax** (decided 2026-10-13): after 30 days as an unverified ghost, a monthly fee applies — $5 first month, $10 second month, +$5 each month after — until they verify ID and pay for a tier, or burn their account and start from scratch. (Policy only; no fee collection or account-burn mechanism implemented.)
+
 ## 2. TRV Token Economics
 
 **Wallet** (implemented in `core/src/wallet.rs` — local state machine only):
