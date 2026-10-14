@@ -6,19 +6,24 @@
 //! Also hosts the activation-code issuer tooling:
 //! - `sentinel keygen` — generate an Ed25519 issuer keypair (private key
 //!   stays on the issuer machine; buyers embed only the public key).
-//! - `sentinel mint` — sign (mint) an activation code.
+//! - `sentinel mint` — sign (mint) an activation code. The issuer seed
+//!   is read from `--key-file <path>` or from stdin with terminal echo
+//!   disabled — never from argv, so it cannot leak via `ps` or shell
+//!   history. Seed memory is wiped after use.
 //! - `sentinel verify` — verify an activation code against a public key.
 //!
 //! And the vault tooling:
 //! - `sentinel vault-migrate --from <plain> --to <enc>` — one-time
 //!   upgrade of a legacy plaintext vault file to the encrypted format.
-//!   The passphrase is read from stdin (never from argv, so it does not
-//!   land in shell history).
+//!   The passphrase is read from stdin with terminal echo disabled
+//!   (never from argv, so it does not land in shell history).
 //!
 //! 100% on-device. std only. No network I/O. No external dependencies.
 
 use std::io::{self, BufRead, Write};
 use trv_core::moe::route;
+
+mod secret;
 
 const BANNER: &str = "The Sentinel (on-device, native). Type a request, or 'quit' to exit.";
 
@@ -55,7 +60,7 @@ fn gather_entropy() -> Result<[u8; 32], &'static str> {
 }
 
 fn cmd_keygen() -> i32 {
-    let seed = match gather_entropy() {
+    let seed_bytes = match gather_entropy() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("keygen failed: {e}");
@@ -63,7 +68,10 @@ fn cmd_keygen() -> i32 {
             return 1;
         }
     };
-    let (secret, public) = trv_core::crypto::ed25519::generate(&seed);
+    // SecretSeed wipes itself on drop: the raw seed never lingers in RAM
+    // after this function returns, on any path.
+    let seed = secret::SecretSeed(seed_bytes);
+    let (secret, public) = trv_core::crypto::ed25519::generate(&seed.0);
     println!("Issuer public key (embed in buyer binaries):");
     println!("{}", public.hex());
     println!();
@@ -89,13 +97,67 @@ fn parse_arg(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+/// Load the 32-byte issuer seed for `mint`.
+///
+/// The seed NEVER comes from argv: `--key` was removed because command-line
+/// arguments are visible to other users via `ps` and persist in shell
+/// history — anyone glimpsing the seed could forge activation codes
+/// forever. Instead the seed is read from `--key-file <path>` or, when
+/// that is absent, from stdin with terminal echo disabled.
+///
+/// Returns the parsed seed (self-wiping on drop) or a human-readable error.
+/// The intermediate hex buffer is wiped before returning on every path.
+fn load_seed(args: &[String]) -> Result<secret::SecretSeed, String> {
+    if parse_arg(args, "--key").is_some() {
+        return Err(
+            "refusing: --key was removed because argv secrets leak via `ps` and shell history.\n\
+             Use --key-file <path>, or enter the 64-hex seed when prompted (input hidden)."
+                .to_string(),
+        );
+    }
+    let mut key_hex = if let Some(path) = parse_arg(args, "--key-file") {
+        std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read key file '{path}': {e}"))?
+    } else {
+        secret::read_secret_line("Issuer seed (64 hex chars, input hidden): ")
+            .map_err(|e| format!("cannot read seed from stdin: {e}"))?
+    };
+
+    let result = (|| {
+        let hex = key_hex.trim();
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("seed must be exactly 64 hex chars (32 bytes)".to_string());
+        }
+        fn val(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => b - b'A' + 10, // validated hexdigit above
+            }
+        }
+        let mut seed = secret::SecretSeed([0u8; 32]);
+        let hb = hex.as_bytes();
+        for i in 0..32 {
+            seed.0[i] = (val(hb[2 * i]) << 4) | val(hb[2 * i + 1]);
+        }
+        Ok(seed)
+    })();
+
+    // Wipe the hex text on every path — parsed, rejected, or errored.
+    secret::wipe_string(&mut key_hex);
+    result
+}
+
 fn cmd_mint(args: &[String]) -> i32 {
     let tier_s = parse_arg(args, "--tier").unwrap_or_else(|| "1".to_string());
     let days_s = parse_arg(args, "--days").unwrap_or_else(|| "365".to_string());
-    let key_hex = match parse_arg(args, "--key") {
-        Some(k) => k,
-        None => {
-            eprintln!("Usage: sentinel mint --key <64-hex-seed> [--tier 1|2|3] [--days N] [--max-devices N]");
+    let seed = match load_seed(args) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            eprintln!(
+                "Usage: sentinel mint [--key-file <path>] [--tier 1|2|3] [--days N] [--max-devices N]"
+            );
             return 1;
         }
     };
@@ -119,30 +181,6 @@ fn cmd_mint(args: &[String]) -> i32 {
         .map(|s| s.parse().unwrap_or(1))
         .unwrap_or(1);
 
-    // Parse the 64-hex-char seed.
-    if key_hex.len() != 64 {
-        eprintln!("--key must be 64 hex chars (32-byte seed)");
-        return 1;
-    }
-    let mut seed = [0u8; 32];
-    for i in 0..32 {
-        let hi = match (key_hex.as_bytes()[2 * i] as char).to_digit(16) {
-            Some(v) => v,
-            None => {
-                eprintln!("--key contains non-hex");
-                return 1;
-            }
-        };
-        let lo = match (key_hex.as_bytes()[2 * i + 1] as char).to_digit(16) {
-            Some(v) => v,
-            None => {
-                eprintln!("--key contains non-hex");
-                return 1;
-            }
-        };
-        seed[i] = (hi * 16 + lo) as u8;
-    }
-
     // Random code_id from the OS CSPRNG. Fails closed if unavailable:
     // a predictable code_id would make activation codes guessable.
     let code_id_bytes = match gather_entropy() {
@@ -161,7 +199,9 @@ fn cmd_mint(args: &[String]) -> i32 {
         .unwrap_or(0);
     let expires_at = now.saturating_add(days.saturating_mul(86_400));
 
-    match trv_core::activation::mint(&seed, code_id, tier, now, expires_at, max_devices) {
+    // `seed` is a SecretSeed: wiped automatically when this function
+    // returns, on every path (success or failure).
+    match trv_core::activation::mint(&seed.0, code_id, tier, now, expires_at, max_devices) {
         Ok(code) => {
             println!("{code}");
             0
@@ -218,8 +258,9 @@ fn cmd_verify(args: &[String]) -> i32 {
 /// One-time upgrade of a legacy plaintext vault file to the encrypted
 /// format: `sentinel vault-migrate --from <plain> --to <enc>`.
 ///
-/// The passphrase is read from stdin (prompted on stderr) so it never
-/// appears in argv or shell history. The plaintext source is left in
+/// The passphrase is read from stdin with terminal echo disabled (never
+/// from argv, so it does not land in shell history and is not
+/// shoulder-surfable). The plaintext source is left in
 /// place; verify the encrypted copy opens, then delete it yourself.
 fn cmd_vault_migrate(args: &[String]) -> i32 {
     let from = match parse_arg(args, "--from") {
@@ -236,16 +277,13 @@ fn cmd_vault_migrate(args: &[String]) -> i32 {
             return 1;
         }
     };
-    eprint!("Vault passphrase: ");
-    let _ = io::stderr().flush();
-    let mut pass = String::new();
-    if io::stdin().read_line(&mut pass).is_err() {
-        eprintln!("could not read passphrase from stdin");
-        return 1;
-    }
-    // Strip the trailing newline without keeping a second copy.
-    let trimmed_len = pass.trim_end_matches(['\n', '\r']).len();
-    pass.truncate(trimmed_len);
+    let mut pass = match secret::read_secret_line("Vault passphrase: ") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("could not read passphrase from stdin");
+            return 1;
+        }
+    };
     let rc = match trv_backend::profile::ProfileVault::migrate_from_plaintext(
         std::path::Path::new(&from),
         std::path::Path::new(&to),
@@ -362,5 +400,56 @@ mod tests {
     fn parse_arg_missing_returns_none() {
         let args: Vec<String> = vec![];
         assert_eq!(parse_arg(&args, "--tier"), None);
+    }
+
+    #[test]
+    fn mint_rejects_legacy_key_in_argv() {
+        // --key must never be accepted: argv secrets leak via ps/history.
+        let args = vec!["--key".to_string(), "ab".repeat(32)];
+        assert!(load_seed(&args).is_err());
+        let args = vec!["--key=deadbeef".to_string()];
+        assert!(load_seed(&args).is_err());
+    }
+
+    #[test]
+    fn mint_loads_seed_from_key_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("trv-test-seed.hex");
+        let hex = "0123456789abcdef".repeat(4); // 64 hex chars
+        std::fs::write(&path, format!("  {hex}\n")).expect("write temp key file");
+        let args = vec![
+            "--key-file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let seed = load_seed(&args).expect("valid key file must load");
+        let mut expected = [0u8; 32];
+        for i in 0..32 {
+            expected[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
+        assert_eq!(seed.0, expected);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mint_rejects_bad_key_file_contents() {
+        let dir = std::env::temp_dir();
+        // Wrong length.
+        let p1 = dir.join("trv-test-seed-bad1.hex");
+        std::fs::write(&p1, "abcd").unwrap();
+        let args = vec!["--key-file".to_string(), p1.to_string_lossy().into_owned()];
+        assert!(load_seed(&args).is_err());
+        // Non-hex.
+        let p2 = dir.join("trv-test-seed-bad2.hex");
+        std::fs::write(&p2, "zz".repeat(32)).unwrap();
+        let args = vec!["--key-file".to_string(), p2.to_string_lossy().into_owned()];
+        assert!(load_seed(&args).is_err());
+        // Missing file.
+        let args = vec![
+            "--key-file".to_string(),
+            "/nonexistent-dir-xyz/trv-seed.hex".to_string(),
+        ];
+        assert!(load_seed(&args).is_err());
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
     }
 }
