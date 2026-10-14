@@ -43,6 +43,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - `backend/` — local-first Hub replacement in Rust (no Node): native auth, SQLite, profile vault, daily watch logic.
 - `ui/` — truly native UI (egui/iced, not webview) + holographic-ui.
 - **Home widget** (decided 2026-10-13): customizable TRV widget for daily thoughts, news, mail, calls, or anything else the user wants. Fully customizable at the highest tier.
+- **News feed implementation** (decided 2026-10-14): pull-based RSS aggregation (Miniflux/FreshRSS-class, self-hosted, zero tracking) from primary wire services and official sources, with RSS-Bridge-class bridging for sourceless sites; user-initiated fetch only, source-transparent, on-device cache, no background phoning home.
 - **Feed & notification design rules** (decided 2026-10-14): finite, structured content batches with intentional stopping cues (no infinite scroll); scheduled notification batching prioritizing direct peer-to-peer interaction over passive engagement metrics; high-contrast scannable layouts with explicit visual hierarchy; no autoplay — media requires deliberate user input before playing. Design goal: connection-first, anti-doomscrolling.
 - `cli/` — Sentinel CLI in Rust.
 - `edge/` — Termux helpers, ESP32 stubs, GrapheneOS verified.
