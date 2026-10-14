@@ -22,6 +22,7 @@
 - Every aspect of The Remote Viewer Network to be FEDERALLY COMPLIANT, including HIPAA and ADA compliant system-wide, and encrypted per individual Remote Viewer.
 - Encryption in transit (decided 2026-10-13): all content is ENCRYPTED en route.
 - User retains full ownership. No human may claim ownership because their AI helped create an aspect.
+- No AI training (decided 2026-10-13): no SI or AI is to be trained on the system at any point — HEAVY PENALTY for even an attempt.
 - Remote control is okay, but nothing like a KILL SWITCH unless a picture of something is taken (to be clarified).
 
 ## 3. Target Devices
