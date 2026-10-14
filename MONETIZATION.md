@@ -55,6 +55,7 @@
 
 - **80% to exclusive creators**: Remote Viewers who create exclusively for TRV keep 80% of what they sell. (Recorded as policy; no sales pipeline implemented.)
 - **Creator paywalls** (confirmed 2026-10-13): creators can paywall their own content. Revenue split: **80% to creator, 20% to TRV**.
+- **Adult content** (decided 2026-10-13): if two adults are consenting and it's XXX, it goes behind a paywall for a fee of the creator's choice, with 15% going to TRV Network for NFT costs. (Exception to the standard 80/20 creator split — adult XXX uses 85/15. Policy only; no implementation.)
 - **Watermarks**: creators get watermarks that cannot be replaced. (Policy only; no implementation.)
 - **Live customization**: Myspace-style account customization with music, but ENHANCED — creator profiles drive this. (Not implemented.)
 - **NFT external sales** (decided 2026-10-13): NFTs can be sold outside TRV for a 20% fee to TRV. (Policy only; no marketplace or settlement implemented.)
