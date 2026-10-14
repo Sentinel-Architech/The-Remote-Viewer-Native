@@ -98,6 +98,7 @@ Current Native repo is a Rust workspace skeleton (`core`, `backend`). Proper reb
 - **AR anti-cashout** (decided 2026-10-13): AR-earned TRV becomes dust if moved to an outside wallet. AR tokens are spendable in-Network only (customization, purchases) — they cannot be cashed out.
 - No TRV tokens transferred to other platforms WITHOUT a transfer fee to TRV. (Transfer-fee amount: **25% to TRV — decided 2026-10-13.** The 50 bps placeholder in `core/src/wallet.rs` is being replaced with the decided 25%. TRV token intended as Solana blockchain crypto.)
 - **External spend fee** (decided 2026-10-13): spending TRV coin elsewhere incurs a 20% fee. This is separate from the 25% transfer fee. Staking is free regardless of how much or how little is staked; staking for 90 days wipes out the 20% fee entirely for the duration of the stake.
+- **Staking rewards** (decided 2026-10-13): the more TRV staked, the more earned (proportional rewards; specific rates TBD). **Staking lock**: taking out stake beforehand is PROHIBITED — 90-day lock, no early unstaking.
 - Each Remote Viewer gets their own digital wallet exclusive to TRV to add money or buy through TRV ecosystem.
 - **Self-custody** (decided 2026-10-13): each Remote Viewer is 100% in charge of their own crypto wallet, which is exclusively TRV — TRV never takes custody.
 - Native camera required for AR, same with phone, GPS, text and everything else a phone uses to communicate — all native.
