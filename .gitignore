@@ -1,0 +1,7 @@
+# Key material — NEVER commit (a program keypair was exposed 2026-10-14 and removed 2026-10-20)
+*-keypair.json
+**/*keypair*.json
+*.keypair
+
+# Build output
+target/
